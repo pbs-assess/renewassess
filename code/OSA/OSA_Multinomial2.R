@@ -4,9 +4,10 @@
 ## 3-15-2024
 ##
 ## SA: revised to match TMB. (1) use the TMB log calculations, (2) include the
-## last category to match (needed?), (3) importantly: need to accumulate nll
+## last category to match (needed? I think just so seed matches),
+# (3) importantly: need to accumulate nll from previous observations
 ## from previously entered observations in OSA.
-## Code is a total mess now... but it matches :)
+## Code is a bit of a mess now... but it matches :)
 #######################################################
 
 ## Install Trijoulet package code:
@@ -61,46 +62,38 @@ rqrMulti <- function(X, P, seed = 123) {
       if (j == 1) {
         p <- P[1, i]
         n <- sum(X[, i])
-      } else if (j <= K) {
+      } else {
         p <- P[j, i] / (1 - sum(P[1:(j - 1), i]))
         n <- sum(X[j:K, i])
-      } else {
-        stop("???")
       }
-
-      # SA: new stuff; calculations as in TMB source:
-      nll <- -dbinom(X[j, i], size = n, prob = p, log = TRUE)
-      nll_out <- c(nll_out, nll)
-      nlcdf.lower <- -pbinom(X[j, i], size = n, prob = p, log.p = TRUE) +
-        sum(nll_out) - nll # !
-      nlcdf.upper <- -pbinom(X[j, i],
-        size = n, prob = p,
-        log.p = TRUE, lower.tail = FALSE
-      ) +
-        sum(nll_out) - nll # !
-      Fx <- c(Fx, 1 / (1 + exp(nlcdf.lower - nlcdf.upper)))
-      px <- c(px, 1 / (exp(-nlcdf.lower + sum(nll_out)) + exp(-nlcdf.upper + sum(nll_out))))
-
-      if (is.nan(nll)) {
+      suppressWarnings({ # Infs/NaNs, dealt with below
+        nll <- -dbinom(X[j, i], size = n, prob = p, log = TRUE)
+        nll_out <- c(nll_out, nll)
+        nll_up_to_obs <- sum(nll_out) - nll
+        nlcdf.lower <- -pbinom(X[j, i], size = n, prob = p, log.p = TRUE) + nll_up_to_obs
+        nlcdf.upper <- -pbinom(X[j, i], size = n, prob = p, log.p = TRUE, lower.tail = FALSE) +
+          nll_up_to_obs
+      })
+      Fx <- c(Fx, 1 / (1 + exp(nlcdf.lower - nlcdf.upper))) # CDF of obs conditional on...
+      px <- c(px, 1 / (exp(-nlcdf.lower + sum(nll_out)) +
+          exp(-nlcdf.upper + sum(nll_out)))) # density of obs conditional on...
+      if (is.nan(nll)) { # generally these are the last category
         nll <- 0
         nll_out[length(nll_out)] <- 0
         Fx[length(Fx)] <- 1
         px[length(px)] <- 1
       }
-
       nlcdf.upper_out <- c(nlcdf.upper_out, nlcdf.upper)
       nlcdf.lower_out <- c(nlcdf.lower_out, nlcdf.lower)
-      # SA: end new stuff
       row <- c(row, j)
       col <- c(col, i)
     }
   }
-  # SA: new stuff:
   set.seed(seed)
   U <- runif(length(Fx))
   z <- qnorm(Fx - U * px)
-  # SA: end new stuff
-  data.frame(row = row, col = col, residual = z, Fx = Fx, px = px, nll = cumsum(nll_out), nlcdf.upper = nlcdf.upper_out, nlcdf.lower = nlcdf.lower_out)
+  data.frame(row = row, col = col, residual = z, Fx = Fx, px = px,
+    nll = cumsum(nll_out), nlcdf.upper = nlcdf.upper_out, nlcdf.lower = nlcdf.lower_out)
 }
 
 ## Our R function version:
@@ -116,3 +109,5 @@ points(qqnorms$x, qqnorms$y, col = 'red', pch = 16)
 ## Same:
 plot(as.numeric(res), res2$residual)
 abline(0, 1)
+
+max(as.numeric(res) - res2$residual)
