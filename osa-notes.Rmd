@@ -1,0 +1,99 @@
+# One-step-ahead residual computation steps for mortals
+
+For `"oneStepGeneric"`, which is probably the most instructive one to work
+through, here are the steps to calculate the OSA residuals:
+
+1. Map all fixed and random parameters to estimated values.
+
+2. Add your data as a parameter vector(!).
+
+3. Create an indicator vector 'keep' that can turn on or off a given data
+   element in the likelihood by multiplying a 1 or 0 with the likelihood value.
+   This will also be a parameter so we can easily pass it to our nll function
+   calls.
+
+4. Now we will iterate through the observations in order.
+
+5. For each observation, we need the CDF of that observation conditional on
+   previous data points with all parameters at their MLEs. There are many ways
+   to get there. We'll continue with the oneStepGeneric algorithm including all
+   tricks for staying in log space.
+
+6. Build a new TMB object with the new map and new parameters (now including
+   data as parameters and a 'keep' parameter vector).
+
+7. Create a function that describes the negative log likelihood over a range of
+   possible values for the given observation conditional on all the above. For
+   `splineApprox = TRUE` this uses a spline on `tmbprofile(..., slice = TRUE)`
+   to limit the number of nll function evaluations, otherwise this uses
+   `Vectorize()` on the TMB nll `fn()` directly.
+
+8. Now, we need to integrate that function up to the data point and to the
+   right of that data point to get the CDF values for our data point we need to
+   work with. For computational reasons, of course, TMB does this in log space.
+   Here's how that happens.
+
+In the following:
+
+* `spline` is our function that returns the nll at a given value of our data
+  point `x` (conditional as above)
+* nll is the negative log likelihood at the observed value `x` (always
+  conditional as above)
+* `discrete` is `TRUE` (1) if discrete and `FALSE` (0) if continuous
+
+```{r, eval=FALSE}
+F1 <- integrate(function(x)exp(-(spline(x) - nll)),
+                                spline.range[1], # where to start integration
+                                obs[index] # where to end integration: the observation value
+                                )$value
+F2 <- integrate(function(x)exp(-(spline(x) - nll)),
+                                obs[index] + discrete, # start at observation
+                                spline.range[2] # to the right end
+                                )$value
+```
+
+Then get back to a negative log CDF with:
+
+```{r, eval=FALSE}
+nlcdf.lower = nll - log(F1)
+nlcdf.upper = nll - log(F2)
+```
+
+I *think* the above is basically what's described on the right side of equation
+8 in Thygesen et al. as the way we can get at the CDFs with the already
+existing model.
+
+For `"cdf"` OSA type, TMB obtains the `nlcdf.lower` and `nlcdf.upper` directly from
+the user-supplied .cpp template where these must be defined.
+
+9. Do the above for each successive data point. As an example, for the 2nd data
+   point, `keep` gets turned on (set to 1) for data points 1 and 2 and we do
+   our integration of the nll across possible values of data point 2. For data
+   point 3, `keep` gets turned on for data points 1, 2, and 3 and we do our
+   integration of the nll across possible values of data point 3.
+
+10. Once we've iterated over all observations that we're interested in, we can
+   calculate the CDF of the current observation given past observations as:
+
+```{r, eval=FALSE}
+Fx <- 1 / ( 1 + exp(nlcdf.lower - nlcdf.upper))
+```
+
+FIXME: I *think* the `exp(nlcdf.lower - nlcdf.upper)` part is the $P^M$ ratio part of
+equation 8 in Thygesen et al. calculated in log space but I'm still trying to
+understand the `1 / 1 +` part. I can see why we need that to ensure we have
+a variable between 0 and 1, i.e. the uniform distribution. Maybe this part is
+clear to someone else?
+
+`Fx` should be uniformly distributed if the model is consistent with the data.
+This is $U_i$ in Thygesen et al. (2017).
+
+I'm going to skip over the discrete observation randomization for simplicity,
+but this part is basically the same as any randomized quantile approach.
+
+11. Our residual is then the following as in any quantile residual approach:
+
+```{r, eval=FALSE}
+residual <- qnorm(Fx)
+```
+
