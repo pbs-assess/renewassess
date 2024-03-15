@@ -60,4 +60,6 @@ summary(sdreport(obj))
 opt$objective
 
 ## Do it manually with a nested RTMB function to get their AD still.
-opt$objective - fmarg(dat, pars)  ## Pretty cool eh?
+pl <- obj$env$parList()
+pl$re <- rep(0, length(pl$re))
+opt$objective - fmarg(dat, pl)  ## Pretty cool eh?
