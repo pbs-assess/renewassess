@@ -51,23 +51,43 @@ rqrMulti <- function(X,P, seed = 123){
   Fx <- NULL
   K <- nrow(X)
   N <- ncol(X)
+  nll_out <- NULL
+  nlcdf.lower_out <- NULL
+  nlcdf.upper_out <- NULL
   for( i in 1:N ){
     ## Equation for Multinomial to Binomials in Trijoulet paper:
-    for( j in 1:(K-1) ){
+    for( j in 1:(K) ){
       if( j == 1 ){
         p <- P[1,i]
         n <- sum(X[,i])
-      }else{
+      } else if (j <= K) {
         p <- P[j,i]/( 1 - sum(P[1:(j-1),i]) )
         n <- sum( X[j:K,i] )
+      } else {
+        stop("???")
       }
-      # SA: new stuff; calculations exactly as in TMB source:
-      nll <- -dbinom(X[j,i], size = n, prob = p, log = TRUE)
-      nlcdf.lower <- -pbinom(X[j,i], size = n, prob = p, log.p = TRUE)
-      nlcdf.upper <- -pbinom(X[j,i], size = n, prob = p,
-        log.p = TRUE, lower.tail = FALSE)
-      Fx <- c(Fx, 1 / (1 + exp(nlcdf.lower - nlcdf.upper)))
-      px <- c(px, 1 / (exp(-nlcdf.lower + nll) + exp(-nlcdf.upper + nll)))
+
+      # SA: new stuff; calculations as in TMB source:
+        nll <- -dbinom(X[j,i], size = n, prob = p, log = TRUE)
+        nll_out <- c(nll_out, nll)
+        nlcdf.lower <- -pbinom(X[j,i], size = n, prob = p, log.p = TRUE) +
+          sum(nll_out) - nll #!
+        nlcdf.upper <- -pbinom(X[j,i], size = n, prob = p,
+          log.p = TRUE, lower.tail = FALSE) +
+          sum(nll_out) - nll #!
+        # nll <- sum(nll_out) #!
+        Fx <- c(Fx, 1 / (1 + exp(nlcdf.lower - nlcdf.upper)))
+        px <- c(px, 1 / (exp(-nlcdf.lower + sum(nll_out)) + exp(-nlcdf.upper + sum(nll_out))))
+
+        if (is.nan(nll)) {
+          nll <- 0
+          nll_out[length(nll_out)] <- 0
+          Fx[length(Fx)] <- 1
+          px[length(px)] <- 1
+        }
+
+      nlcdf.upper_out <- c(nlcdf.upper_out, nlcdf.upper)
+      nlcdf.lower_out <- c(nlcdf.lower_out, nlcdf.lower)
       # SA: end new stuff
       row <- c(row, j)
       col <- c(col, i)
@@ -78,12 +98,12 @@ rqrMulti <- function(X,P, seed = 123){
   U <- runif(length(Fx))
   z <- qnorm(Fx - U * px)
   # SA: end new stuff
-  data.frame(row = row, col = col, residual = z)
+  data.frame(row = row, col = col, residual = z, Fx = Fx, px = px, nll = cumsum(nll_out), nlcdf.upper = nlcdf.upper_out, nlcdf.lower = nlcdf.lower_out)
 }
-
 
 ## Paul's function
 res2 <- rqrMulti(X,P)
+res2 <- res2[-seq(6, 60, by = 6),] # last category
 
 ## Compare them:
 qqnorm(res, pch = 4, col = 'blue')
