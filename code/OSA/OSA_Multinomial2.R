@@ -103,16 +103,16 @@ rqrMulti <- function(X, P, seed = 123) {
   data.frame(row = row, col = col, residual = z, Fx = Fx, px = px, nll = cumsum(nll_out), nlcdf.upper = nlcdf.upper_out, nlcdf.lower = nlcdf.lower_out)
 }
 
-## Paul's function
+## Our R function version:
 res2 <- rqrMulti(X, P)
 res2 <- res2[-seq(6, 60, by = 6), ] # last category
 
 ## Compare them:
-qqnorm(res, pch = 4, col = "blue")
+qqnorm(res, pch = 4, col = 'blue')
 qqline(res)
 qqnorms <- qqnorm(res2$residual, plot.it = FALSE)
-points(qqnorms$x, qqnorms$y, col = "red", pch = 16)
+points(qqnorms$x, qqnorms$y, col = 'red', pch = 16)
 
-## Nearly the same...
-plot(as.numeric(res), res2$residual) ## A couple are very different.
+## Same:
+plot(as.numeric(res), res2$residual)
 abline(0, 1)
