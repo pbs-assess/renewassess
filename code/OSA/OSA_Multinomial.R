@@ -73,7 +73,7 @@ rqrMulti <- function(X,P){
 }
 
 
-## Paul's function
+## Paul's function. Now confirmed to be correct. Off by random amount due to random seed and length differences.
 res2 <- rqrMulti(X,P)
 
 ## Compare them:
