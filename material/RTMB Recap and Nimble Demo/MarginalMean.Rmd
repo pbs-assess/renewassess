@@ -1,0 +1,299 @@
+---
+title: "Marginal vs Conditional Means"
+subtitle: "Pacific Stock Assessment Renewal"
+author: "Paul van Dam-Bates"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+knitr_opts <- list(
+  message = FALSE,
+  warning = FALSE,
+  collapse = TRUE,
+  comment = "#>",
+  fig.width = 7,
+  dpi = 300,
+  out.width = "700px",
+  fig.asp = 1 / 1.618,
+  cache = FALSE,
+  autodep = TRUE,
+  cache.comments = TRUE,
+  fig.align = "center",
+  echo = FALSE,
+  results = 'hide'
+)
+do.call(knitr::opts_chunk$set, knitr_opts)
+```
+
+```{r libs, include=FALSE}
+library(ggplot2)
+library(dplyr)
+library(RTMB)
+options(ggplot2.continuous.colour = "viridis")
+options(ggplot2.continuous.fill = "viridis")
+ggplot2::theme_set(ggplot2::theme_minimal())
+```
+
+## What is a marginal vs conditional mean?
+
+- A marginal mean is averaged, and a conditional mean is dependent (conditioned on something).
+
+- This often arises in the context of mixed-effects modelling. Let's consider a GLMM for context. We will use unbalanced data to make differences obvious.
+
+```{r, echo = TRUE, show = "markup"}
+set.seed(21453)
+dat <-  NULL
+re.true <- NULL
+sd.re <- 0.75
+lambda <- 4.5
+loglambda <- log(lambda)
+for( i in 1:25 )
+{
+  ngrpi <- rpois(1,10)  ## Going to make unbalanced data
+  re <- rnorm(1, 0, sd.re)
+  dat <- rbind(dat, data.frame(y = rpois(ngrpi, exp(re + loglambda)), id = i))
+  re.true <- c(re, re.true)
+}
+
+## Fit the model:
+library(glmmTMB)
+fit <- glmmTMB(y ~ 1 + (1|id), data = dat, family = "poisson")
+summary(fit)
+```
+
+- In the above code, what is the true marginal mean?
+
+```{r}
+## What is the marginal mean?
+margmean <- mean(rpois(10000, exp(loglambda + rnorm(10000, 0 , sd = sd.re))))
+margmean
+## spoiler
+exp(loglambda + sd.re^2/2)
+```
+
+- Does the model estimate the marginal mean? or the conditional mean? What is it conditioning on?
+
+```{r}
+## Conditional mean (conditional on re = 0).
+predict(fit, newdata = data.frame(id = 3), re.form = NA)
+
+## Conditional mean (given the random effect of a single group)
+predict(fit, newdata = data.frame(id = 3))
+
+## What about the estimate of a new id?
+predict(fit, newdata = data.frame(id = 50))
+```
+
+- Let's compare the conditional mean estimates with the true values.
+
+```{r, echo = TRUE}
+condmean.true <- exp(re.true + 1.5)
+condmean.est <- predict(fit, newdata = data.frame(id = 1:25), type = "response")
+boxplot(condmean.est - condmean.true)
+abline(h = 0, col = 'red')
+```
+
+- So the conditional mean was estimated without any visible bias in this example!
+
+- What about the marginal mean? Did we get all the other parameters correct?
+
+```{r, echo = TRUE}
+sdre.est <- attr(summary(fit)$varcor[[1]]$id, "stddev")
+sdre.est - sd.re
+
+exp(loglambda + sd.re^2/2) - exp(fixef(fit)[[1]]) ## Off by a bit.
+```
+- For inference, are we interested in knowing the relationship between the fixed effects and the marginal mean or the conditional mean?
+
+- Let's start with a normal distribution to understand explicitly why they are so different. If $x \sim \text{normal}(\mu, \sigma)$, and $y = e^x$, then what is the expected value of $y$? First the maths,
+
+$$ \mathbb{E}_y(y) = \mathbb{E}_x(e^x) = e^{\mu + \sigma^2/2}.$$
+This comes from the moment generating function of the normal distribution. Let's see it in code.
+
+```{r, echo = TRUE}
+mu = 2
+sigma = 1.5
+x <- rnorm(10000, mean = mu, sd = sigma)
+y <- exp(x)
+mean(y - exp(mu))
+mean(y - exp(mu + sigma^2/2))
+
+median(y - exp(2))
+```
+
+- Circling back, in the Poisson example, we were using a log link function and fitting,
+$$ log(\lambda_i) = \beta_0 + u_i,$$
+where $u_i$ is a random effect. As a result, we were essentially making $\lambda$ a log-normally distributed random variable. This means that the $\lambda$ being estimated no longer represents the marginal mean on the real scale, but actually the median. 
+a. Do people care about this in practice? 
+a. What would we want to report?
+
+### What do we need to know about these transformations.
+
+1. The conditional mean transformation is unbiased because by conditioning on the random effect, we realize a single value and there is no transformation bias incurred ($\lambda$ isn't a random variable).
+
+1. The marginal mean on the link scale is not the marginal mean on the real scale for non-identity link functions and Gaussian random effects.
+
+1. Do we need to worry about this in MCMC? In general no, as long as we transform the posterior samples to the real scale first, then the posterior mean will be the actual mean (similar to point 1).
+
+1. Generally, if we ever exponetiate 'white noise', then the mean of the exponentiated variable will not match the mean on the log scale.
+
+1. This is not a quantile problem. Medians are not impacted by this transformation.
+
+- Let's do it in RTMB to see if we can find an unbiased estimate.
+
+```{r, echo = TRUE}
+library(RTMB)
+
+nll <- function(pars){
+  getAll(pars, dat)
+  sdre <- exp(logsdre)
+  lambda <- exp(loglambda)
+  ADREPORT(lambda)
+  ADREPORT(sdre)
+  
+  negll <- -sum(dnorm(re, 0, sdre, log = TRUE))
+  negll <- negll - sum(dpois(y, exp(loglambda + re[id]), log = TRUE))
+  negll
+}
+obj <- MakeADFun(nll, parameters = list(logsdre = 0, loglambda = 0, 
+  re = rep(0, max(dat$id))), silent = TRUE, random = "re")
+fit1 <- nlminb(obj$par, obj$fn, obj$gr)
+sdrep1 <- sdreport(obj)
+summary(sdrep1, "report")
+```
+
+- A good paper on this topic to consider reading is "A class of generalized linear mixed models adjusted for marginal interpretability" by Gory et al. (2020).
+
+"The choice between a marginal and conditional model often hinges on the goal of the analysis. Traditional advice is that if interest focuses exclusively on population-level effects, use a marginal model; if interest focuses on individual-level effects, use a conditional model."
+
+A GLMM is marginally interpretable if and only if for all $\mathbf{x}^t\boldsymbol{\beta}$,
+$$ \mathbb{E}(Y) = \int \mathbb{E}(Y|\mathbf{U} = \mathbf{u})f_\mathbf{u}(\mathbf{u})d\mathbf{u},$$
+where $f_\mathbf{u}(\mathbf{u})$ is the density of the random effects.
+
+For the log-link, Gory et al. (2020) suggest that
+$$ \mathbb{E}(Y_i|U_i = u) = \text{exp}(\mathbf{x}^t\boldsymbol{\beta} + u - \sigma^2/2)$$ leads to a marginally interpretable GLMM with a log link and Gaussian random effects.
+
+```{r, echo = TRUE}
+nll_corrected <- function(pars){
+  getAll(pars, dat)
+  sdre <- exp(logsdre)
+  lambda <- exp(loglambda)
+  ADREPORT(lambda)
+  ADREPORT(sdre)
+  
+  negll <- -sum(dnorm(re, mean = 0, sd = sdre, log = TRUE))
+  loglam <- loglambda + re[id] - sdre^2/2
+  negll <- negll - sum(dpois(y, exp(loglam), log = TRUE))
+  negll
+}
+
+objc <- MakeADFun(nll_corrected, parameters = list(logsdre = 0, loglambda = 0, 
+  re = rep(0, max(dat$id))), silent = TRUE, random = "re")
+fitc <- nlminb(objc$par, objc$fn, objc$gr)
+sdrepc <- sdreport(objc)
+summary(sdrepc, "report")
+```
+
+## Why does this matter to me?
+
+- It is common in stock assessment models to adjust the estimated mean by what is often called a 'bias correction'. If you have done that then the previous section should have looked familiar.
+
+- Is the marginal mean the important value for stock assessment recruitment?
+
+### The Ricker Curve
+
+Now consider the Harrison Chinook data again. If we assume a Ricker stock relationship curve with log-normal error, then
+$$ log(R_i/S_i) = log(\alpha) - \beta S_i + \epsilon_i,$$
+where $\epsilon_i \sim \text{normal}(0, \sigma^2)$.
+
+People often state that they want to model the mean stock recruit relationship. Similar to the marginal mean, we need,
+$$ \mathbb{E}(R/S) = \int \mathbb{E}(\text{exp}(log(\alpha) - \beta S_i + \epsilon)|\mathbf{\epsilon} = \mathbf{\epsilon})f_\mathbf{\epsilon}(\epsilon)d\epsilon.$$
+
+Then as before, we may adjust the linear relationship such that,
+$$log(R_i/S_i) = log(\alpha) - \beta S_i + \epsilon_i - \sigma^2/2.$$
+Okay great. Writing the model this way ensures that the Ricker model is marginally interpretable.
+
+```{r, echo = TRUE}
+load("harck")
+nll_corrected <- function(pars){
+  getAll(pars, harck)
+  sd <- exp(logsd)
+  beta <- exp(logbeta)
+  ExpectedR <- exp(logalpha - beta*S)*S
+  REPORT(ExpectedR)
+  negll <- -sum(dnorm(logRS, mean = logalpha - beta*S - sd^2/2, sd = sd, log = TRUE))
+  negll
+}
+
+objc <- MakeADFun(nll_corrected, 
+  parameters = list(logsd = 0, logbeta = 0, logalpha = 0), silent = TRUE)
+fitc <- nlminb(objc$par, objc$fn, objc$gr)
+```
+
+- What is the impact of adding this correction term to the linear equation?
+
+- Is this the $\alpha$ that is biologically relevant for the stock?
+
+- What if we have a random effect too?
+
+```{r, echo = TRUE, show = "markup"}
+# Let's say that every 3 years there is a shift.
+newdat <- harck
+newdat$id <- (newdat$by %% 7) + 1
+u <- rnorm(7, 0, 1)
+newdat$logRS <- newdat$logRS + u[newdat$id]
+
+nll_corrected <- function(pars){
+  getAll(pars, newdat)
+  sd <- exp(logsd)
+  sdre <- exp(logsdre)
+  beta <- exp(logbeta)
+  negll <- 0
+  negll <- negll - sum(dnorm(re, 0, sdre, log = TRUE))
+  ExpectedR <- exp(logalpha - beta*S)*S
+  REPORT(ExpectedR)
+  negll <- negll - sum(dnorm(logRS, mean = logalpha - beta*S + re[id] - sd^2/2, sd = sd, log = TRUE))
+  negll
+}
+
+objc <- MakeADFun(nll_corrected, 
+  parameters = list(logsd = 0, logbeta = 0, logalpha = 0, logsdre = 0, re = rep(0, 7)), 
+  random = "re", silent = TRUE)
+fitc <- nlminb(objc$par, objc$fn, objc$gr)
+```
+
+- Do the additional correction
+
+```{r, echo = TRUE}
+nll_corrected2 <- function(pars){
+  getAll(pars, newdat)
+  sd <- exp(logsd)
+  sdre <- exp(logsdre)
+  beta <- exp(logbeta)
+  negll <- 0
+  negll <- negll - sum(dnorm(re, 0, sdre, log = TRUE))
+  ExpectedR <- exp(logalpha - beta*S)*S
+  REPORT(ExpectedR)
+  negll <- negll - sum(dnorm(logRS, mean = logalpha - beta*S + re[id] - sd^2/2 - sdre^2/2, sd = sd, log = TRUE))
+  negll
+}
+
+objcc <- MakeADFun(nll_corrected2, parameters = list(logsd = 0, logbeta = 0, logalpha = 0, logsdre = 0, re = rep(0, 7)), random = "re", silent = TRUE)
+fitcc <- nlminb(objcc$par, objcc$fn, objcc$gr)
+
+## Difference in logalpha
+fitc$par["logalpha"] - fitcc$par["logalpha"]
+```
+
+## Other transformations
+
+- The log transformation is easy as the moment generating function gives us the inverse transformation.
+
+- For logit-links it is not as straightforward as we have the transformation,
+$$\frac{1}{1 + e^{-\mathbf{x}^t\boldsymbol{\beta} - u}},$$
+we can see that is it not obvious right away what the correction for the marginal mean should be. As a result, when and how you apply these corrections should be thought out, including the implications of them. We may use simulation to approximate the integrals to report marginal means when they are required but 'cooking' them into the likelihood is much more challenging.
+
+However, for consistency in reporting in stock assessment, if the marginal mean is of interest, then it is important that the actual marginal means for each stock are reported consistently and incorporating all of the transformations.

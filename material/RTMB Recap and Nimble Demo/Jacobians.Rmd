@@ -1,0 +1,290 @@
+---
+title: "Change of Variables + Bayesian Examples"
+subtitle: "Pacific Stock Assessment Renewal"
+author: "Paul van Dam-Bates"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+knitr_opts <- list(
+  message = FALSE,
+  warning = FALSE,
+  collapse = TRUE,
+  comment = "#>",
+  fig.width = 7,
+  dpi = 300,
+  out.width = "700px",
+  fig.asp = 1 / 1.618,
+  cache = FALSE,
+  autodep = TRUE,
+  cache.comments = TRUE,
+  fig.align = "center",
+  echo = FALSE,
+  results = 'hide'
+)
+do.call(knitr::opts_chunk$set, knitr_opts)
+```
+
+```{r libs, include=FALSE}
+library(ggplot2)
+library(dplyr)
+library(RTMB)
+options(ggplot2.continuous.colour = "viridis")
+options(ggplot2.continuous.fill = "viridis")
+ggplot2::theme_set(ggplot2::theme_minimal())
+```
+
+## Transformations
+
+Often in statistics we need to convert from $x$ to $y$ where $y = g(x)$. In these cases we know the distribution of $x$, $f_x(x)$ but do not know the distribution of $y$, $f_y(y)$. When working with continuous random variables, we can use a change of variable,
+
+$$f_y(\mathbf{y}) = f_x(g^{-1}(\mathbf{x})) |\mathbf{J}_{g^{-1}(x)}|.$$
+
+Let's start with the simplest version we are familiar with where $x$ is a standard normal distribution,
+$$ f_x(x) = \frac{1}{\sqrt{2\pi}}e^{-0.5x^2}. $$
+Then, if $y = \mu + z\sigma$, then 
+
+$$ f_y(y) = f_x((y - \mu)/\sigma) \times 1/\sigma = \frac{1}{\sqrt{2\pi}\sigma}e^{-0.5\big(\frac{y-\mu}{\sigma}\big)^2}.$$
+
+## But when do I need Jacobians?
+
+1. Is your variable being transformed a RANDOM VARIABLE? Yes? Then you need a Jacobian.
+
+
+Example 1, you are running a linear model and need to transform $\theta = log(\sigma)$, so that we can fit $\theta$ for computational reasons doing maximum likelihood estimation. Do you need to do a transformation of variables?
+
+Example 2, it is the same situation, however you are going to find the posterior distribution. You assume that $\sigma \sim \text{gamma}(\alpha, \beta)$.
+a. You are using MCMC and a Gibbs sampler to sample $\sigma$.
+
+a. You are using MCMC and applying a standard Metropolis Hastings random walk.
+
+a. You are using STAN and HMC to sample $\sigma$ with a constraint applied to the STAN
+argument.
+
+a. You are using STAN and HMC to sample $log(\sigma)$.
+
+a. You are just finding the maximum a posterior mode (MAP) of $log(\sigma)$.
+
+Example 3, you are using a $u \sim \text{gamma}(\alpha, \beta)$ distributed random effect, instead of Gaussian and will use Laplace to find the MLE.
+
+
+### Worked example:
+
+Create an objective function to find the posterior mode.
+
+```{r, echo = TRUE, show = "markup"}
+## Version 1
+set.seed(123)
+y <- rnorm(1000, 5, 3)
+fn1 <- function(par){
+  getAll(par)
+  sigma <- exp(logsigma)
+  negll <- 0
+  negll <- negll - dgamma(sigma, shape = 1, scale = 1, log = TRUE)
+  negll <- negll - dnorm(mu, 0, sd = 0.01, log = TRUE)
+  negll <- negll - sum(dnorm(y, mean = mu, sd = sigma, log = TRUE))
+  negll
+}
+par <- list(mu = 0, logsigma = 1)
+obj1 <- MakeADFun(fn1, par, silent = TRUE)
+
+trans <- MakeTape(function(x){exp(x)}, 0.1)
+fn2 <- function(par){
+  getAll(par)
+  sigma <- exp(logsigma)
+  negll <- 0
+  negll <- negll - dgamma(trans(logsigma), shape = 1, scale = 1, log = TRUE) - 
+    logsigma
+  negll <- negll - dnorm(mu, 0, sd = 0.01, log = TRUE)
+  negll <- negll - sum(dnorm(y, mean = mu, sd = sigma, log = TRUE))
+  negll
+}
+obj2 <- MakeADFun(fn2, par, silent = TRUE)
+obj1$fn()
+obj2$fn()
+```
+
+### Worked example:
+
+Create an example with gamma distributed random effects.
+
+```{r, echo = TRUE, show = "markup"}
+set.seed(123)
+y <- rnbinom(100, size = 10, prob = 0.5)
+
+gammapois1 <- function(pars){
+  getAll(pars)
+  p <- 1/(1+exp(-logitp))
+  size <- exp(logsize)
+  lambda <- exp(loglambda)
+  REPORT(lambda)
+  negll <- -sum(dgamma(lambda, shape = size, scale = (1-p)/p, log = TRUE))
+  negll <- negll - sum(dpois(y, lambda, log = TRUE))
+  negll
+}
+pars <- list(loglambda = rnorm(length(y), 0, 0.1), logsize=log(10), logitp = 1)
+obj1 <- MakeADFun(gammapois1, pars, random = "loglambda", silent = TRUE)
+obj1$fn()
+fit1 <- nlminb(obj1$par, obj1$fn, obj1$gr)
+
+gammapois2 <- function(pars){
+  getAll(pars)
+  p <- 1/(1+exp(-logitp))
+  size <- exp(logsize)
+  lambda <- exp(loglambda)
+  REPORT(lambda)
+  n <- length(y)
+  negll <- -sum(dgamma(lambda, shape = size, scale = (1-p)/p, log = TRUE)) - 
+    sum(loglambda)
+  negll <- negll - sum(dpois(y, lambda, log = TRUE))
+  negll
+}
+obj2 <- MakeADFun(gammapois2, pars, random = "loglambda", silent = TRUE)
+obj2$fn()
+fit2 <- nlminb(obj2$par, obj2$fn, obj2$gr)
+
+tru.fn <- function(pars){
+  -sum(dnbinom(y, size = exp(pars[1]),  
+    prob = 1/(1+exp(-pars[2])), log = TRUE))
+}
+obj1$fn(c(log(10), 0))
+obj2$fn(c(log(10), 0))
+tru.fn(c(log(10), 0))
+```
+
+### Rules:
+
+1. Is it a random variable being transformed? If it is, it needs a transformation and that means a Jacobian!
+1. Frequentist: If it is and it is a parameter then it does not need a Jacobian. If it is a random-effect it does need a Jacobian.
+1. Bayesian: Parameters are random variables and thus need the Jacobian.
+
+- Failure to transform properly using the Jacobian will result in not actually using the distribution you think you are on the parameter space you are intending. A flat distribution on the log scale does not imply totally flat on the real scale.
+
+## STAN and RTMB - 
+
+### Setting up prior distributions
+
+```{r, echo = TRUE, show = "markup"}
+## Create a general transformation method:
+prior_transforms <- function(theta){
+  c(theta[1], theta[2], exp(theta[3]), exp(theta[4]), 1/(1+exp(-theta[5])))
+}
+F <- MakeTape(prior_transforms, numeric(5))
+determinant(F$jacobian(numeric(5)), log  = TRUE)
+
+```
+
+- STAN and RTMB interface: get the data out.
+
+```{r echo = TRUE, show = "markup", eval = FALSE}
+library(tmbstan)
+fn <- function(par){
+  getAll(par, harck)
+  ## Requires stupid logistic limit trick to make sure uniform is maintained.
+  ## Didn't work in STAN...
+  ## beta <- transilogit(logbeta)*0.1 + 0    ## beta ~ uniform(0,1)
+  ## sigma <- transilogit(logsigma)*1000 + 0  ## sigma ~ uniform(0,1000)
+  ## alpha <- transilogit(logalpha)*100 + 0  ## alpha ~ uniform(0, 100)
+
+  beta <- exp(logbeta)    ## beta ~ uniform(0,1)
+  sigma <- exp(logsigma)  ## sigma ~ uniform(0,1000)
+  alpha <- exp(logalpha)  ## alpha ~ uniform(0, 100)
+
+  negll <- 0
+  ## Add prior distributions:
+  negll <- negll - log(1/0.1) - logbeta
+  negll <- negll - log(1/1000) - logsigma
+  negll <- negll - log(1/100) - logalpha
+  
+  Expected_logRS <- log(alpha) - beta*S
+  negll <- negll - sum(dnorm(logRS, 
+                        mean = Expected_logRS, sd = sigma, log = TRUE))
+
+  Smsy <- (1 - LambertW0(exp(1 - log(alpha))))/beta
+  umsy <- (1 - LambertW0(exp(1 - log(alpha))))
+  Sgen <-  -1/beta*LambertW0(-beta*Smsy/alpha)
+
+  REPORT(Smsy)
+  REPORT(umsy)
+  REPORT(Sgen)
+  REPORT(sigma)
+  REPORT(alpha)
+  REPORT(beta)
+  return(negll)
+}
+
+obj <- MakeADFun(fn, list(logbeta=0,logsigma=0, logalpha=0), silent = TRUE) ## uh oh!
+fit.map <- nlminb(obj$par, obj$fn, obj$gr)
+
+fit.stan <- tmbstan(obj, chains=1, iter = 10000, 
+  init = c(0,0,0), lower = c(-Inf, -Inf, -Inf), upper = log(c(0.1, 1000, 100)))
+
+## Let's get posterior samples for all our REPORTS.
+post <- as.matrix(fit.stan)
+report <- obj$report()
+post.report <- matrix(0,  nrow = nrow(post), ncol = length(report))
+colnames(post.report) <- names(report)
+for( i in 1:nrow(post) )
+    post.report[i,] <- do.call('c', 
+        obj$report(post[i,seq_along(obj$par)]))
+
+summary(coda::mcmc(post.report))
+```
+
+```{r echo = FALSE, eval = FALSE}
+transilogit <- MakeTape(function(x){1/(1+exp(-x))}, 0)
+
+fn <- function(par){
+  getAll(par, harck)
+  ## Requires stupid logistic limit trick to make sure uniform is maintained.
+  ## Didn't work in STAN...
+  beta <- transilogit(logbeta)*0.1 + 0    ## beta ~ uniform(0,0.1)
+  sigma <- transilogit(logsigma)*1000 + 0  ## sigma ~ uniform(0,1000)
+  alpha <- transilogit(logalpha)*100 + 0   ## alpha ~ uniform(0, 100)
+
+  negll <- 0
+  ## Add prior distribution
+  negll <- negll - log(abs(transilogit$jacobian(logbeta)))
+  negll <- negll - log(abs(transilogit$jacobian(logsigma)))
+  negll <- negll - log(abs(transilogit$jacobian(logalpha)))
+
+  Expected_logRS <- log(alpha) - beta*S
+  negll <- negll - sum(dnorm(logRS, 
+                        mean = Expected_logRS, sd = sigma, log = TRUE))
+
+  Smsy <- (1 - LambertW0(exp(1 - log(alpha))))/beta
+  umsy <- (1 - LambertW0(exp(1 - log(alpha))))
+  Sgen <-  -1/beta*LambertW0(-beta*Smsy/alpha)
+
+  REPORT(Smsy)
+  REPORT(umsy)
+  REPORT(Sgen)
+  REPORT(sigma)
+  REPORT(alpha)
+  REPORT(beta)
+  return(negll)
+}
+
+obj <- MakeADFun(fn, list(logbeta=0,logsigma=0, logalpha=0), silent = TRUE) ## uh oh!
+fit.map <- nlminb(obj$par, obj$fn, obj$gr)
+obj$report()
+
+fit.stan <- tmbstan(obj, chains=1, iter = 10000, init = c(0,0,0))
+traceplot(fit.stan, pars=names(obj$par), inc_warmup=TRUE)
+
+## Let's get posterior samples for all our REPORTS.
+post <- as.matrix(fit.stan)
+report <- obj$report()
+post.report <- matrix(0,  nrow = nrow(post), ncol = length(report))
+colnames(post.report) <- names(report)
+for( i in 1:nrow(post) )
+    post.report[i,] <- do.call('c', 
+        obj$report(post[i,seq_along(obj$par)]))
+
+summary(coda::mcmc(post.report))
+```
+
+

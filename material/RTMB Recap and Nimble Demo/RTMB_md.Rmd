@@ -1,0 +1,634 @@
+---
+title: "RTMB Review"
+subtitle: "Pacific Stock Assessment Renewal"
+author: "Paul van Dam-Bates"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+knitr_opts <- list(
+  message = FALSE,
+  warning = FALSE,
+  collapse = TRUE,
+  comment = "#>",
+  fig.width = 7,
+  dpi = 300,
+  out.width = "700px",
+  fig.asp = 1 / 1.618,
+  cache = FALSE,
+  autodep = TRUE,
+  cache.comments = TRUE,
+  fig.align = "center",
+  echo = FALSE,
+  results = 'hide'
+)
+do.call(knitr::opts_chunk$set, knitr_opts)
+```
+
+```{r libs, include=FALSE}
+library(ggplot2)
+library(dplyr)
+library(RTMB)
+options(ggplot2.continuous.colour = "viridis")
+options(ggplot2.continuous.fill = "viridis")
+ggplot2::theme_set(ggplot2::theme_minimal())
+```
+
+## Part I: Re-introduction to RTMB
+
+Load in some data.
+
+```{r, echo = TRUE}
+data(ChickWeight)
+```
+
+Consider chick weight data where $w$ = weight, $t$ = time, $k$ = chick (1,...,50), and $D$ = diet (1,2,..., 4). 
+
+$$w_i = \beta_0 + \beta_t t_i + \beta_{D_i}+ \epsilon_i.$$
+
+In this case, 
+
+$$\epsilon_i \sim \text{normal}(\mu_i, \sigma^2),$$
+
+where 
+
+$$\mu_i = \beta_0 + \beta_t t_i + \beta_{D_i}.$$
+
+We can code the factor diet in two ways:
+
+1. Levels 2-4 are coded as level 1 (Intercept) + difference.
+
+```{r, echo = TRUE}
+Design1 <- matrix(0, nrow = nrow(ChickWeight), ncol = 4)
+Design1[cbind(1:nrow(ChickWeight), ChickWeight$Diet)] <- 1
+Design1[,1] <- 1  ## All observations get Intercept.
+Design1 <- cbind(Design1, ChickWeight$Time)
+```
+
+2. Each diet gets a different Intercept.
+
+```{r, echo = TRUE}
+Design2 <- matrix(0, nrow = nrow(ChickWeight), ncol = 4)
+Design2[cbind(1:nrow(ChickWeight), ChickWeight$Diet)] <- 1
+Design2 <- cbind(Design2, ChickWeight$Time)
+```
+
+
+### Constructing a log-likelihood
+
+- The probability density function for the $i$th observed weight is
+
+$$
+  f(w_i|\mathbf{\theta}) = \text{normal}(\mu_i, \sigma^2)
+$$
+
+- The likelihood for the $n$ observed data is then the product of the individual densities, $f(\cdot)$,
+
+$$
+L(\mathbf{\theta}|\mathbf{w}) = \prod_{i=1}^n f(w_i|\mathbf{\theta}).
+$$
+This comes from the fact that if X and Y are independent then $f(X, Y) = f(X)\times f(Y)$. Is this true here?
+
+- We work on the log-scale as probabilities become small and tend to underflow, creating numerical issues. This leads to the sum of the log of each observed density $f$,
+
+$$
+l(\mathbf{\theta}|\mathbf{w}) = log(L(\mathbf{\theta}|\mathbf{w})) = \sum_{i=1}^n log(f(w_i|\mathbf{\theta})).
+$$
+Just in case you forgot, $log(A \times B) = log(A) + log(B)$.
+
+- Functions like `optim` or `nlminb` that do optimization in R seek to MINIMIZE the function as a default. For maximum likelihood estimation, we want to find the maximum of the log likelihood, or the minimum of the negative log likelihood.
+
+### Code the negative log-likelihood
+
+Functions like `nlminb` require a single vector to do optimization over that must be the first argument to the function. For this reason, we start with creating a function that has a single vector input.
+
+Note that we generally want our parameters to be unconstrained for optimization. In this case, those are $\boldsymbol{\beta}$ and $\sigma$ (e.g., $\sigma \in (0, \infty) \to log(\sigma) \in (-\infty, \infty)$.
+
+
+```{r, echo = TRUE}
+## Parameters are coefficients in the design matrix and variance sigma:
+fn <- function(par){
+  beta <- par[1:ncol(X)]  ## X is Design Matrix
+  sigma <- exp(par[ncol(X)+1])  ## Is this necessary?
+  ## Do yourself...
+  }
+```
+
+```{r, echo = FALSE}
+## Parameters are coefficients in the design matrix and variance sigma:
+fn <- function(par){
+  beta <- par[1:ncol(Design1)]  ## X is Design Matrix
+  sigma <- exp(par[ncol(Design1)+1])
+  mu <- Design1 %*% beta
+  sum(-dnorm(ChickWeight$weight, mu, sigma, log = TRUE))
+}
+```
+```{r, echo = TRUE, results = "markup"}
+fit <- lm(weight ~ Diet + Time, data = ChickWeight)
+fit2 <- nlminb(c(rep(0, ncol(Design1)),0), fn)
+coef(fit) - fit2$par[1:ncol(Design1)]
+sigma(fit) - exp(fit2$par[ncol(Design1)+1]) ## Why aren't these that close?
+biascorrection <- nrow(ChickWeight)/(nrow(ChickWeight)-1)
+sigma(fit) - exp(fit2$par[ncol(Design1)+1])*biascorrection ## Better.
+```
+Note that the MLE for a linear model, $\widehat{\sigma} = \frac{\sum(x_i-\widehat{\mu})^2}{n}$, but this is slightly positively biased by $\frac{n}{n-1}$.
+
+### Why RTMB?
+
+1. Speed - Makes R run in C++
+
+```{r, echo = TRUE, results="markup"}
+library(RTMB)
+pars <-  c(rep(0, ncol(Design1)),0)
+obj <- MakeADFun(fn, pars, silent = TRUE)
+microbenchmark::microbenchmark(
+    rtmb = obj$fn(pars),
+    baseR = fn(pars))
+```
+
+2. Automatic Differentiation - Accurate!
+
+```{r}
+gr_true <- function(par){
+  beta <- par[1:ncol(Design1)]  ## X is Design Matrix
+  sigma <- exp(par[ncol(Design1)+1])
+  mu <- Design1 %*% beta
+  gr <- rep(0, length(par))
+  for( i in 1:length(beta)){
+      gr[i] <- sum(-1/sigma^2*(ChickWeight$weight-mu)*Design1[,i])
+  }
+  gr[i+1] <- -nrow(Design1) + sum((ChickWeight$weight-mu)^2*sigma^-2)
+  return(gr)
+}
+gr_true(fit2$par)
+```
+
+```{r, echo = TRUE, results="markup"}
+## Finite Difference vs AD
+gr_true(fit2$par) - pracma::jacobian(obj$fn, fit2$par)
+gr_true(fit2$par) - obj$gr(fit2$par)
+```
+
+3. Automatic Differentiation - Fast!
+
+```{r, echo = TRUE, results="markup"}
+microbenchmark::microbenchmark(
+      rtmb = obj$gr(fit2$par),
+      baseR = pracma::jacobian(obj$fn, fit2$par))
+
+```
+
+--- 
+
+### Useful Definitions:
+
+1. Derivative is the rate of change in the function at a single location of the input. For $f(x)$, we know that we are at a maximum or minimum if $\frac{df}{dx} = 0$.
+
+2. If we have multiple variables (vector input), but a single output from the function (scalar), then we have what are called a partial derivatives, describing how things change in each direction, (e.g. $\frac{\partial f}{\partial x_1}$ ). 
+
+3. For $N$ inputs, the gradient is the vector of partial derivatives, 
+$$\nabla f = \begin{pmatrix}
+\frac{\partial f}{\partial x_1} \\
+\vdots \\
+\frac{\partial f}{\partial x_N}
+\end{pmatrix}.
+$$
+
+
+4. If the response has multiple outputs $f_1, \ldots f_K$, then the matrix of all gradients is referred to as the Jacobian $\mathbf{J}$,
+
+$$\mathbf{J} = (\nabla f_1, \ldots, \nabla f_K).$$
+
+5. For a likelihood, we will only ever have a single output, and so generally minimize the gradient, but that is specific version of a Jacobian.
+
+6. Key piece of theory for transformations: if $\mathbf{y} = g(\mathbf{x})$, then using transformation of variables,
+$$f_y(\mathbf{y}) = f_x(g^{-1}(\mathbf{x})) |\mathbf{J}_{g^{-1}(x)}|$$
+Example: lognormal distribution:
+Normal Distribution: 
+$$f(x) = \frac{1}{\sqrt{2\pi}\sigma}\text{exp}\Big(-\frac{(x-\mu)^2}{2\sigma^2}\Big)$$
+Then if we want $y = exp(x)$, then $J = \frac{d \text{exp}(x)}{d x}$ and the density becomes,
+$$f(y) = \frac{1}{\sqrt{2\pi}\sigma y}\text{exp}\Big(-\frac{(log(y)-\mu)^2}{2\sigma^2}\Big)$$
+```{r, echo = TRUE, show = "markup"}
+## Log transform
+logtransform <- MakeTape(function(x){return(log(x))}, 0) ## go from (0, inf) -> (-inf, inf)
+dlognorm <- function(x, mean, sigma){
+  ans <- NULL
+  for( i in seq_along(x) ) {
+    ans <- c(ans, 
+      dnorm(logtransform(x[i]), mean, sigma)*det(logtransform$jacobian(x[i])))
+  }
+  return(ans)
+}
+y <- seq(0, 10, by = 0.1)
+plot(y, dlognorm(x=y, 0, 1), xlab = "y", ylab = "density - lognormal", type = 'l')
+
+## Logit Transform
+logittransform <- MakeTape(function(x){return(log(x/(1-x)))}, 0) ## go from (0,1) -> (-inf, inf)
+dlogitnorm <- function(x, mean, sigma){
+  ans <- NULL
+  for( i in seq_along(x)) {
+    ans <- c(ans, 
+      dnorm(logittransform(x[i]), mean,sigma)*
+        abs(det(logittransform$jacobian(x[i]))))
+  }
+  return(ans)
+}
+p <- seq(0.0001,0.999,0.01)
+plot(p, dlogitnorm(x=p, 0, 1), xlab = "p", 
+  ylab = "density - logitnormal", type = 'l')
+```
+
+---
+
+
+### Why do derviatives matter?
+
+1. Helps us find the maximum/minimum, when the gradient (vector of partial derivatives) is zero.
+
+1. The variance is defined by the inverse of the Hessian (of the negative log likelihood). Hessian is the derivative of the derivative.
+
+1. Finite difference methods are very slow and often inaccurate.
+
+1. Automatic differentiation can be faster than analytically defined gradients due to the building of a tape. The tape is an efficient set of rules for a chain rule where a lot of the algebra is pre-computed as constants (when building the tape).
+
+
+## The Laplace Approximation
+
+- The Laplace approximation approximately integrates "normal looking" likelihood surfaces by a single point evaluation at the mode.
+- Consider the above Chick Weights problem with a random effect per chick.
+
+```{r, echo = TRUE, results="markup"}
+library(glmmTMB)
+fit.glmm <- glmmTMB(weight ~ Diet + Time + (1|Chick), data = ChickWeight)
+fixef(fit.glmm)
+```
+
+New Log-Likelihood
+
+- Each random-effect, $u_k$ is assumed to be normally distributed with mean 0, and variance $\sigma_{re}^2$.
+
+- The joint distribution for the random-effects of $N$ chicks is then,
+
+$$
+f(\mathbf{u}|\boldsymbol{\theta}) = \prod_{k=1}^N f(u_k|\boldsymbol{\theta})
+$$
+
+- The change in the log-likelihood happens to the expected value of each observation,
+
+$$\mu_i = \beta_0 + \beta_t t_i + \beta_{D_i} + u_{chick_i}$$
+
+The new likelihood is then
+
+$$L(\boldsymbol{\theta}|\mathbf{w},\mathbf{u}) = f(\mathbf{u}|\boldsymbol{\theta}) \prod_{i=1}^n f(w_i|u_{chick_i}, \boldsymbol{\theta}).$$
+
+- The log-likelihood is defined as the sum over the log observed densities plus, the sum of the random effect densities,
+
+$$l(\boldsymbol{\theta}|\mathbf{w},\mathbf{u}) = \sum_{k=1}^N log(f(u_i|\boldsymbol{\theta})) + \sum_{k=i}^n log(f(w_i|u_{chick_i}, \boldsymbol{\theta})).$$
+
+```{r, echo = TRUE}
+ChickWeight$chick <- as.integer(as.character(ChickWeight$Chick))
+pars.re <- list(beta = rep(0, ncol(Design1)),
+                logsigma = 0, logsigmare = 0,
+                re = rep(0, max(ChickWeight$chick)))
+## Parameters are coefficients in the design matrix and variance sigma:
+fn <- function(par){
+  getAll(par)
+  sigma <- exp(logsigma)
+  sigmare <- exp(logsigmare)
+  mu <- Design1 %*% beta + re[as.numeric(ChickWeight$Chick)]
+  ADREPORT(sigma)
+  ADREPORT(sigmare)
+  negll <- sum(-dnorm(ChickWeight$weight, mu, sigma, log = TRUE)) 
+  negll <- negll - sum(dnorm(re, 0, sigmare, log = TRUE))
+  negll
+}
+obj <- MakeADFun(fn, parameters=pars.re, silent = TRUE)
+fit.re <- nlminb(obj$par, obj$fn, obj$gr)
+sdreport(obj)
+```
+
+- To actually make inference we need to marginalize out the $N$ unobserved random effects, $\mathbf{u}$.
+
+$$f(\mathbf{w}|\mathbf{\theta}) = \int_{-\infty}^\infty \cdots \int_{-\infty}^\infty f(\mathbf{w}| \mathbf{u}, \mathbf{\theta}) f(\mathbf{u} | \mathbf{\theta}) du_{1} \cdots d_{N}.$$
+
+- This is an N dimensional integral, which in this particular case, can be written as $N$ single dimension integrals as each chick is independent.
+
+- Works well when this likelihood is unimodal (has one maximum) and looks roughly normal locally. The approximation is EXACT when Normally distributed observations and random effects like in this example.
+
+- The Laplace approximation works by creating a Normal distribution that looks kind of like the posterior distribution of the random-effects we are integrating out,
+
+$$f_G(\mathbf{u}|\mathbf{w}, \mathbf{\theta}) \approx \text{Multivariate-Normal}(\widehat{\mathbf{u}}, H_{\widehat{u}}^{-1}).$$
+
+
+- Then, evaluated at the mean,
+
+$$f_G(\widehat{\mathbf{u}} | \mathbf{w}, \mathbf{\theta}) = \frac{det(H_\widehat{u})^{0.5}}{(2\pi)^{N/2}}$$
+
+- The Laplace approximation is then,
+
+$$f(\mathbf{w}|\mathbf{\theta}) \approx  f(\mathbf{w}| \mathbf{u}, \mathbf{\theta}) f(\mathbf{u} | \mathbf{\theta})/ f_G(\widehat{\mathbf{u}} | \mathbf{w}, \mathbf{\theta})$$
+
+- The recipe is for Laplace is then to find $\widehat{\mathbf{u}}$ for some value of $\boldsymbol{\theta}$, and then find the Hessian $H_{\widehat{u}}$ and calculate,
+
+$$l(\boldsymbol{\theta}|\mathbf{w}) \approx \frac{N}{2}log(2\pi) - log(det(H_{\widehat{u}})) + l(\boldsymbol{\theta}|\mathbf{w},\widehat{\mathbf{u}})$$
+
+- Let's do it in RTMB now manually.
+
+```{r, echo = TRUE}
+nre <- max(ChickWeight$chick)
+obj.re <- MakeADFun(fn, parameters = pars.re, silent = TRUE, 
+    map = list(beta = factor(rep(NA, ncol(Design1))), 
+      logsigma = factor(NA), 
+      logsigmare = factor(NA)))
+fit.re.only <- nlminb(obj.re$par, obj.re$fn, obj.re$gr)
+
+laplace_approx <- -nre*log(2*pi) + 
+    log(det(obj.re$he(fit.re.only$par))) +   obj.re$fn(fit.re.only$par)
+
+obj.laplace <- MakeADFun(fn, parameters = pars.re, 
+                          silent = TRUE, random = "re")
+obj.laplace$fn(obj.laplace$par) - laplace_approx
+obj.laplace$env$last.par[-(1:(ncol(Design1)+2))] - fit.re.only$par
+```
+
+```{r, echo = TRUE, show = 'markup'}
+fit.laplace <- nlminb(obj.laplace$par, obj.laplace$fn, obj.laplace$gr)
+fit.laplace$par[1:ncol(Design1)] - fixef(fit.glmm)[[1]] ## Matched it.
+```
+
+### RTMB practice:
+
+Choose one of:
+
+1. Write a general RTMB function that does Laplace manually.
+1. Find an example where you don't think Laplace will work well.
+
+
+## Part II: Stock-Recruit Example
+
+- Consider a Ricker stock recruit relationship for salmon, where $R_t$ is recruitment from year $t$ spawners $S_t$,
+
+$$R_t = \alpha S_t e^{-\beta S_t}$$
+- As a linear equation,
+$$log(R_t/S_t) = log(\alpha) - \beta S_t$$
+
+- Install `samEst` from https://github.com/Pacific-salmon-assess/samEst/tree/main
+- We will use `load("harck.Rda")` from the GitHub page for this section.
+
+### The Basic Linear Model
+
+- Code a linear model for the Harrison Chinook stock-recruitment data using RTMB (assuming Gaussian error structure for log(R/S)).
+
+```{r, echo = TRUE, show= 'markup'} 
+load("harck")
+fit.harck <- glmmTMB(logRS ~ S, data=harck)
+summary(fit.harck)
+```
+
+```{r, echo = TRUE}
+fn <- function(par){
+  getAll(par, harck)
+  beta <- exp(logbeta)
+  sigma <- exp(logsigma)
+
+  Expected_logRS <- logalpha - beta*S
+  negll <- -sum(dnorm(logRS, 
+                        mean = Expected_logRS, sd = sigma, log = TRUE))
+  ADREPORT(sigma)
+  alpha <- exp(logalpha)
+  ADREPORT(alpha)
+  ADREPORT(beta)
+  return(negll)
+}
+
+pars <- list(logalpha = 0, logbeta = 0, logsigma = 0)
+obj <- MakeADFun(fn, pars, silent = TRUE)
+fit <- nlminb(obj$par, obj$fn, obj$gr)
+sdrep <- sdreport(obj)  ## All the values
+summary(sdrep, "fixed", p.value = TRUE)  
+summary(sdrep, "report", p.value = TRUE)
+```
+
+- Variance for the parameters being optimized can be written based on the Hessian,
+
+$$V(\boldsymbol{\theta}) = H_\theta^{-1}.$$
+
+- For a single term, $V(log(\alpha)) = V(\boldsymbol{\theta})_{1,1}$.
+- Example,
+
+```{r, echo = TRUE, show = 'markup'}
+H <- obj$he(fit$par)
+V <- solve(H)
+sqrt(diag(V)) - summary(sdrep, "fixed")[,2]
+```
+
+- What about the transformed variables? RTMB uses the Delta method,
+
+
+$$V(g(\theta)) \approx \nabla g V(\theta) \nabla g'$$
+
+```{r, echo = TRUE, show = 'markup'}
+grad <- exp(fit$par)
+Vg <- t(grad %*% V) %*% grad
+sqrt(diag(Vg)) - summary(sdrep, "report")[c("alpha", "beta", "sigma"),2]
+```
+- By now it should be really clear that if we can write fast code that efficiently returns derivatives, inference is pretty easy.
+
+
+## RTMB Tricks
+
+### ADjoint and using R functions by providing derivatives manually.
+
+- Classic example: LambertW. Remember that $W(z) = w$ solves $$z = w e^w$$. This is solved numerically in different programs but not known analytically. It makes more sense to solve the derivative as it is known, instead of building a tape on the numerical method. In this case, we will want the derivative, $\frac{dW(z)}{dz}$. From implicit differentiation (and the chain rule),
+$$
+  1 = \frac{dW(z)}{dz}e^{W(z)} + W(z)e^{W(z)}\frac{dW(z)}{dz}.
+$$
+As a result,
+$$ \frac{dW(z)}{dz} = \frac{1}{[1+W(z)]e^W(z)} = \frac{1}{z + e^{W(z)}}$$
+For the example,
+```{r, echo = TRUE}
+## Note we can just use any package function if we can provide the Jacobian.
+## In this case, y = w above and x = z. It gets recycled so you don't have to calculate it twice. The dy term is because of the AD reverse rule and needing "d/dx sum( f(x) * dy )"⁠
+lamw <- ADjoint(
+  function(x){gsl::lambert_W0(x)},
+  function(x, y, dy) {dy / (x + exp(y))}
+)
+
+F <- MakeTape(lamw, 0.1)
+#F(0.1)
+#gsl::lambert_W0(0.1)
+#F$jacobian(0.1)
+#pracma::jacobian(gsl::lambert_W0, 0.1)
+```
+
+- Here is another example using the normal distribution.
+
+```{r, echo = TRUE}
+x <- rnorm(100, 0.25, 0.1)
+myneg_dnorm <- function(theta){
+  sum(-dnorm(x, theta[1], theta[2], log = TRUE))
+}
+gr_myneg_dnorm <- function(theta, f, df) {
+  deriv <- numeric(2)
+  deriv[1] <- -sum(x-theta[1])/theta[2]^2
+  deriv[2] <- length(x)/theta[2] - sum((x-theta[1])^2)/theta[2]^3
+  df * deriv ## Not sure if I need the df...
+}
+test <- ADjoint(myneg_dnorm, gr_myneg_dnorm )
+grtest <- MakeTape(test, c(0,1))
+fad <- MakeTape(myneg_dnorm, c(0,1))
+fad$jacobian(c(0,1)) - grtest$jacobian(c(0,1))
+```
+
+### Update data without running MakeADFun or MakeTape again.
+
+```{r, echo = TRUE}
+f <- function(p) {
+    getDat <- function(x) {
+        .GlobalEnv$mydat
+    }
+    empty <- advector(rep(0, 0)) ## Important this is empty but ad variable...
+    ## Add R function to the AD tape
+    y <- DataEval(getDat, empty)
+    -sum(dnorm(y, p$mu, p$sd, log=TRUE))
+}
+mydat <- rnorm(10000, 0, 10)
+obj <- MakeADFun(f, list(mu=0, sd=1), silent = TRUE)
+fit1 <- nlminb(obj$par, obj$fn, obj$gr)
+mydat <- rnorm(10000, 10, 1)
+fit2 <- nlminb(obj$par, obj$fn, obj$gr)
+fit1$par
+fit2$par
+```
+
+### What AD doesn't like
+
+- We can't condition the likelihood based on an AD variable. For example,
+
+```{r, echo = TRUE, show = 'markup', eval = FALSE}
+fn <- function(x){
+  if(x < 0) -1/2
+  else 1/5
+}
+fnt <- MakeTape(fn, 0.5)
+```
+
+### What about uniform distributions?
+
+```{r, echo = TRUE, eval = FALSE}
+fn <- function(theta){
+  -dunif(theta, 0, 1,log = TRUE)
+}
+# fnt <- MakeTape(fn, 0.5)
+```
+
+- How can I go from uniform random variable to real scale? 
+One way, for $y \sim \mathcal{U}(a,b)$. 
+$$x = \text{logit}\{(y-a)/(b-a)\}.$$
+We then transform using a change of variables (the Jacobian), 
+$$f(x) = \frac{1}{b-a} \times \Big|\frac{d }{dx} (b-a)\text{logit}^{-1}(x) + a\Big|.$$
+
+```{r, echo = TRUE, show = 'markup'}
+## Make a tape to get a Jacobian.
+transilogit <- MakeTape(function(x){1/(1+exp(-x))}, 0)
+
+## What does a uniform prior look like transformed
+u <- runif(100000, 0, 1)*0.01
+f <- NULL
+for( i in seq(-10, 10, by = 0.1)) f <- c(f, 1/0.01*0.01*abs(transilogit$jacobian(i)))
+plot(seq(-10, 10, by = 0.1), f, xlab = "x", ylab = "Density", pch = 16)
+lines(density(log(u/(0.01)/(1-u/(0.01)))), col = 'red', lwd=3)
+```
+
+
+### Non-numeric argument to mathematical function?
+
+One common error we will see is the Non-numeric argument to mathematical function. This happens when an `advector` is passed to an R function that is not implemented in RTMB.
+
+For example, in RTMB `dgamma` is only implemented for shape and scale (not rate). R uses rate so we need to be explicit about which is which.
+
+```{r, echo = TRUE}
+func <- function(theta){
+  -dgamma(0.35, theta[1], theta[2], log = TRUE)
+}
+# attempt1 <- MakeTape(func, c(1,1))
+func <- function(theta){
+  -dgamma(0.35, shape = theta[1], scale = 1/theta[2], log = TRUE)
+}
+attempt2 <- MakeTape(func, c(1,1))
+```
+
+### Understanding the TAPE:
+
+```{r, echo = TRUE}
+func <- function(theta){
+  myvalue <- 0L
+  myvalue <- theta
+  myvalue <- myvalue * exp(theta)
+  myvalue
+}
+test <- MakeTape(func, 1)
+requireNamespace("igraph")
+G <- igraph::graph_from_adjacency_matrix(test$graph())
+plot(G, vertex.size=17, layout=igraph::layout_as_tree)
+```
+
+- If you are building packages in RTMB then you need to make sure that you use `ADoverload` to make sure it tracks types correctly. In this case, `"[<-" <- ADoverload("[<-")` can be placed at the beginning of a function.
+
+- How can you make a function that passes data and parameters?
+
+```{r, echo = TRUE, markup = "show"}
+## Data as explicit argument
+nll <- function(parms, y) {
+  getAll(parms)
+  -sum(dnorm(y, mean = mean, sd = sigma, log = TRUE))
+}
+cmb <- function(f, d) function(p) f(p, d) ## From Kasper... what does it do???
+obj <- RTMB::MakeADFun(cmb(nll, rnorm(100, 1, 4)), list(mean = 0, sigma = 3))
+obj$fn()
+```
+### R package example linear regression
+
+```{r, echo = TRUE, show = "markup"}
+lm_internal <- function(pars){
+  "[<-" <- ADoverload("[<-")
+  getAll(pars)
+  sigma = exp(logsigma)
+  mu <- X %*% beta
+  ADREPORT(sigma)
+  
+  -sum(dnorm(y, mean = mu, sd = sigma, log = TRUE))
+}
+
+mylm <- function(formula, data) {
+    X <- model.matrix(formula, data)
+    pars <- list()
+    pars$beta <- rep(0, ncol(X))
+    pars$logsigma <- 0
+
+    terms <- terms(formula)
+    y <- data[,as.character(terms[[2]])]
+
+    data <- local({X <- X; y <- y; environment()})
+    environment(lm_internal) <- data
+    obj <- MakeADFun(lm_internal, pars, silent = TRUE)
+    opt <- nlminb(obj$par, obj$fn, obj$gr)
+    rep <- sdreport(obj)
+    return(rep)
+}
+
+mylm(weight ~ Time + Diet, data = ChickWeight)
+```
+
+### RTMB Practice
+
+- Write an auto regressive process for the `harck` data in RTMB.
+- Calculate and generate confidence intervals for maximum sustainable yield ( $S_{msy}$ ) and for the number of spawners needed to return to $S_{msy}$ in one generation, $S_{gen}$.
+
+- Example: https://github.com/Pacific-salmon-assess/samEst/blob/main/R/LamW_RTMB.r
+
+
+

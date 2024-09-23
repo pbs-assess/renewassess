@@ -1,0 +1,400 @@
+---
+title: "Introduction to Nimble"
+subtitle: "Pacific Stock Assessment Renewal"
+author: "Paul van Dam-Bates"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+knitr_opts <- list(
+  message = FALSE,
+  warning = FALSE,
+  collapse = TRUE,
+  comment = "#>",
+  fig.width = 7,
+  dpi = 300,
+  out.width = "700px",
+  fig.asp = 1 / 1.618,
+  cache = FALSE,
+  autodep = TRUE,
+  cache.comments = TRUE,
+  fig.align = "center",
+  echo = FALSE,
+  results = 'hide'
+)
+do.call(knitr::opts_chunk$set, knitr_opts)
+```
+
+```{r libs, include=FALSE}
+library(ggplot2)
+library(dplyr)
+options(ggplot2.continuous.colour = "viridis")
+options(ggplot2.continuous.fill = "viridis")
+ggplot2::theme_set(ggplot2::theme_minimal())
+```
+
+## Part I: Introduction to Nimble
+
+NIMBLE stands for Numerical Inference for statistical Models for Bayesian and Likelihood Estimation.
+
+One way to think about nimble is as a C++ compiler with a bunch of built in algorithms. Those algorithms include (often in separate packages):
+
+1. Markov chain Monte Carlo (MCMC)
+
+1. Automatic Differentiation
+
+1. Hamiltonian Monte Carlo (HMC), a specific type of MCMC that uses gradients to sample the posterior (e.g. STAN) (`nimbleHMC`)
+
+1. Laplace approximation (to be included in `nimbleQuad`)
+
+1. Adaptive Gauss-Hermite quadrature (to be included in `nimbleQuad`)
+
+1. Monte Carlo Expectation Maximization (MCEM)
+
+1. Particle filtering, Particle MCMC, Iterated Particle Filtering, and Ensemble Kalman Filter (`nimbleSMC`)
+
+1. Ecological model components such as N-Mixture and Occupancy (`nimbleEcology`)
+
+1. Spatial Capture-Recapture Models (`nimbleSCR`)
+
+It is capable of building a graphical model based off of what is essentially the BUGS language (also used by JAGS) but offers it's own version of custom functions as well.
+
+My goal is to create a version called `nimbleFisheries` that contains all the key functions that people need to complete their stock assessment models.
+
+```{r data, echo = TRUE}
+library(nimble)
+data(ChickWeight)
+```
+
+Let's fit the same linear model as the previous section but with Nimble.
+
+```{r mod1, echo = TRUE, show = 'markup', eval = FALSE}
+modelcode <- nimbleCode({
+  ## Make some priors. These give bounds for parameter transformations.
+  ## for( i in 1:nfixef ) beta[i] ~ dnorm(0,1)
+  ## sigma ~ dgamma(1,1)
+  
+  ## Parameter bounds:
+  for( i in 1:nfixef ) beta[i] ~ dflat() #(-inf, inf)
+  sigma ~ dhalfflat()                    #(0, inf)
+  
+  ## Build the Likelihood
+  for (i in 1:n){
+    mu[i] <- inprod(beta[1:nfixef], X[i,])
+    w[i] ~ dnorm(mean = mu[i], sd = sigma)
+  }
+})
+X <- model.matrix(~ Diet + Time, ChickWeight)
+constants <- list(X = X, nfixef = ncol(X), n = nrow(ChickWeight))
+dat <- list(w = ChickWeight$weight)
+model <- nimbleModel(code = modelcode, constants = constants,
+                    data = dat, buildDerivs = TRUE) ## Turn on or off AD.
+
+## Create some initial values:
+model$beta <- rep(0, length(model$beta))
+model$sigma <- 1
+
+## Run model with them:
+model$calculate()
+```
+
+Now let's look at how we can actually use this model.
+```{r calc, echo = TRUE, show = 'markup', eval = FALSE}
+## How can we call the function?
+model$beta <- rep(0, ncol(X))
+model$sigma <- 1
+model$calculate() ## Same as calling the objective function!
+```
+Let's turn that into C++.
+
+```{r speed, echo = TRUE, show = 'markup', eval = FALSE}
+cmodel <- compileNimble(model)
+cmodel$calculate()
+microbenchmark::microbenchmark(
+  Rversion = model$calculate(),
+  Cversion = cmodel$calculate()
+  )
+```
+Okay now let's do maximum likelihood estimation. In this case, we don't care about any prior distributions. Luckily, Nimble has a graph which allows us to only change some pieces of the data and calculate specific parts of the likelihood.
+
+To start, we think about how we can access the parts of the model due to its hierarchical structure. We have helper functions like `getDependencies` that will tell us all the model nodes that depend on a single parameter. So if we are doing maximization on `sigma`, then we will want to find all the data that depend on `sigma`.
+
+```{r nodenames, echo = TRUE, show ='markup', eval = FALSE}
+## What are all the nodes in the model:
+head(cmodel$getNodeNames())
+
+## what nodes depend on just the data?
+nodes <- cmodel$getDependencies("sigma", self = FALSE)
+nodes[1:5]
+## Can access any individual probability in the model:
+cmodel$getLogProb(nodes[1]) - 
+  dnorm(values(cmodel, nodes[1]), mean = cmodel$mu[1], sd = cmodel$sigma, log = TRUE)
+
+## Access all the data probabilities:
+head(cmodel$logProb_w)
+
+## Get the "current" log probability of a node:
+cmodel$getLogProb("sigma")
+
+## We can access current model values via getLogProb, or if we have updated something, we need to run 'calculate'.
+cmodel$sigma <- 3
+cmodel$getLogProb("w[1]")
+cmodel$calculate("w[1]")
+```
+
+Knowing node structure and how to use `calculate` is part of how Nimble can be super efficient. Instead of calling an entire objective function defined in model code, we can just call pieces of it that relate to specific parameters and not update the entire function each time.
+
+Now we will use the model structure to build what is called a Nimble Function. They are broken up into three key pieces:
+
+1. `setup` - This is the first function for a Nimble Function. It executes in R and builds globally accessible values for the entire Nimble Function. We can pass it anything and use R commands and specific packages within.
+
+1. `run` - This is the typically the main function that is run by model code. This function will be compiled into C++ and thus is not really `R` code but R-like code that has to be written in a way that the compiler can understand.
+
+1. `methods` - This is any additional functions you might want to be able to use either in run code or separately. They are built in a `list()`.
+
+In the example we will not use `run`.
+
+```{r nf, echo = TRUE, show = 'markup', eval = FALSE}
+## Now let's build the likelihood using a Nimble Function:
+fn <- nimbleFunction(
+  setup = function(model, paramNodes){    ## Executed purely in R before compilation.
+    ## Clean up node names.
+    paramNodes <- model$expandNodeNames(paramNodes)
+    ## Get the log likelihood nodes.
+    calcNodes <- model$getDependencies(paramNodes, self = FALSE)
+    
+    # Set up the additional arguments for nimDerivs involving model$calculate
+    derivsInfo <- makeModelDerivsInfo(model, paramNodes, calcNodes)
+    updateNodes <- derivsInfo$updateNodes
+    constantNodes <- derivsInfo$constantNodes
+    
+    # Create a parameter transformation between original and unconstrained
+    # parameter spaces.
+    transformer <- parameterTransform(model, paramNodes)
+  },
+  #run = function(){},
+  methods = list(
+    neg_logLikelihood = function(ptrans = double(1)) {
+      # Objective function for optim,
+      # using transformed parameter space.
+      p <- transformer$inverseTransform(ptrans)
+      values(model, paramNodes) <<- p
+      return(-model$calculate(calcNodes))
+      returnType(double())
+    },
+    gr_neg_logLikelihood = function(ptrans = double(1)) {
+      # Gradient of neg log likelihood
+      d <- derivs(neg_logLikelihood(ptrans), wrt = 1:length(ptrans), order = 1,
+                  model = model, updateNodes = updateNodes,
+                  constantNodes = constantNodes)
+      return(d$jacobian[1,])
+      returnType(double(1))
+    },
+    inverse = function(ptrans = double(1)) { # ... and its inverse.
+      return(transformer$inverseTransform(ptrans))
+      returnType(double(1))
+    }
+  ),
+  buildDerivs = 'neg_logLikelihood'
+)
+
+## Build function which calls setup.
+objR <- fn(model, c("beta", "sigma"))
+## Now can run in R.
+objR$neg_logLikelihood(c(rep(0, ncol(X)), 0))
+
+## Compile into C++
+obj <- compileNimble(objR, project = model) ## Compile this into C++ too!
+obj$neg_logLikelihood(c(rep(0, ncol(X)), 3)) 
+## These calls change the global model values.
+values(cmodel, c('beta', 'sigma'))
+obj$neg_logLikelihood(c(rep(0, ncol(X)), 0))
+values(cmodel, c('beta', 'sigma'))
+
+fit <- nlminb(values(cmodel, c('beta', 'sigma')), 
+    obj$neg_logLikelihood, obj$gr_neg_logLikelihood)
+
+fit.lm <- lm(weight ~ Diet + Time, data = ChickWeight)
+c(coef(fit.lm), sigma(fit.lm)) - obj$inverse(fit$par)
+```
+
+Just like in RTMB, we might want to get the variance estimates by finding the inverse of the Hessian. Let's write a function to do that now and also the Delta method that TMB uses.
+
+```{r nfgr, echo = TRUE, show = 'markup', eval = FALSE}
+## Now let's build the likelihood using a Nimble Function:
+fn <- nimbleFunction(
+  setup = function(model, paramNodes){    ## Executed purely in R before compilation.
+    ## Clean up node names.
+    paramNodes <- model$expandNodeNames(paramNodes)
+    ## Get the log likelihood nodes.
+    calcNodes <- model$getDependencies(paramNodes, self = FALSE)
+    
+    # Set up the additional arguments for nimDerivs involving model$calculate
+    derivsInfo <- makeModelDerivsInfo(model, paramNodes, calcNodes)
+    updateNodes <- derivsInfo$updateNodes
+    constantNodes <- derivsInfo$constantNodes
+    
+    # Create a parameter transformation between original and unconstrained
+    # parameter spaces.
+    transformer <- parameterTransform(model, paramNodes)
+  },
+  #run = function(){},
+  methods = list(
+    neg_logLikelihood = function(ptrans = double(1)) {
+      ## Objective function for optim/or nlminb,
+      ## using transformed parameter space.
+      p <- transformer$inverseTransform(ptrans)
+      values(model, paramNodes) <<- p
+      return(-model$calculate(calcNodes))
+      returnType(double())
+    },
+    gr_neg_logLikelihood = function(ptrans = double(1)) {
+      ## Gradient of neg log likelihood
+      d <- derivs(neg_logLikelihood(ptrans), wrt = 1:length(ptrans), order = 1,
+                  model = model, updateNodes = updateNodes,
+                  constantNodes = constantNodes)
+      return(d$jacobian[1,])
+      returnType(double(1))
+    },
+    inverse = function(ptrans = double(1)) { # ... and its inverse.
+      return(transformer$inverseTransform(ptrans))
+      returnType(double(1))
+    },
+    hessian = function(ptrans = double(1)){
+      ## Gradient of the gradient of neg log likelihood (hessian)
+      d <- derivs(gr_neg_logLikelihood(ptrans), wrt = 1:length(ptrans), order = 1)
+      return(d$jacobian)
+      returnType(double(2))
+    },
+    gr_inverse = function(ptrans = double(1)){
+      d <- derivs(inverse(ptrans), wrt = 1:length(ptrans), order = 1)
+      returnType(double(2))
+      return(d$jacobian)
+    },
+    standarderror = function(ptrans = double(1), trans = logical(0, default = FALSE)){
+      returnType(double(1))
+      vcov <- inverse(hessian(ptrans))
+      if(trans) return(sqrt(diag(vcov)))
+      gr <- gr_inverse(ptrans)
+      vcov_delta <- gr %*% vcov %*% t(gr)
+      return(sqrt(diag(vcov_delta)))
+    }
+  ),
+  buildDerivs = c('neg_logLikelihood', 'gr_neg_logLikelihood', 'inverse')
+)
+
+cmodel <- compileNimble(model)
+objR <- fn(model, c("beta", "sigma"))
+obj <- compileNimble(objR, project = model) ## Compile this into C++ too!
+values(cmodel, 'beta') <- rep(0, length(values(cmodel, 'beta') ))
+values(cmodel, 'sigma') <- 15
+fit <- nlminb(values(cmodel, c('beta', 'sigma')), 
+    obj$neg_logLikelihood, obj$gr_neg_logLikelihood)
+
+obj$inverse(fit$par)
+obj$standarderror(fit$par, trans = FALSE)
+```
+
+Well that was a lot of work to find the MLE for a super basic problem. But it's actually fully generalized for any model input. Let's reassess the Harrison Chinook data and use this again.
+
+```{r harck, echo = TRUE, show = 'markup', eval = FALSE}
+library(samEst)
+data(harck)
+
+modelcode <- nimbleCode({
+  ## Make some priors. These give bounds for parameter transformations.
+  beta ~ dhalfflat()
+  alpha ~ dhalfflat()
+  sigma ~ dhalfflat()  
+
+  ## Build the Likelihood
+  for (i in 1:n){
+    E_logRS[i] <- log(alpha) - beta*S[i]
+    logRS[i] ~ dnorm(mean = E_logRS[i], sd = sigma)
+  }
+})
+constants <- list(n = nrow(harck), S = harck$S)
+dat <- list(logRS = harck$logRS)
+model <- nimbleModel(code = modelcode, constants = constants,
+                    data = dat, buildDerivs = TRUE) ## Turn on or off AD.
+
+## Create some initial values:
+model$beta <- 0.00001
+model$sigma <- 0.1
+model$alpha <- 2
+## Run model with them:
+model$calculate()
+
+cmodel <- compileNimble(model)
+objR <- fn(model, c("alpha", "beta", "sigma"))  ## New parameters.
+obj <- compileNimble(objR, project = model)
+
+fit <- nlminb(c(0, 0, 0), 
+    obj$neg_logLikelihood, obj$gr_neg_logLikelihood)
+
+obj$inverse(fit$par)
+obj$standarderror(fit$par, trans = FALSE)
+```
+
+Now try writing an auto regressive process for these data in Nimble.
+
+```{r harckAR1, echo = TRUE, show = 'markup', eval = FALSE}
+load("harck")
+library(nimble)
+modelcode <- nimbleCode({
+  ## Make some priors. These give bounds for parameter transformations.
+  beta ~ dhalfflat()
+  alpha ~ dhalfflat()
+  sigma ~ dhalfflat()  
+  sigma_yr ~ dhalfflat()
+  phi ~ dunif(-1,1)
+  
+  ar1[1] ~ dnorm(mean = 0, sd = sigma_yr/sqrt(1-phi^2))
+  ## AR1 Process:
+  for( y in 2:yrmax ){
+    ar1[y] ~ dnorm(mean = phi*ar1[y-1], sd = sigma)
+  }
+  
+  ## Build the Likelihood
+  for (i in 1:n){
+    E_logRS[i] <- log(alpha) - beta*S[i] + ar1[year[i]]
+    logRS[i] ~ dnorm(mean = E_logRS[i], sd = sigma)
+  }
+})
+harck$yrf <- harck$by - min(harck$by) + 1
+constants <- list(n = nrow(harck), S = harck$S, yrmax = max(harck$yrf), year = harck$yrf)
+dat <- list(logRS = harck$logRS)
+## Create some initial values:
+inits <- function(){list(beta = 0.0001, sigma = 0.1, 
+  alpha = 2, sigma_yr = 0.01, phi = -0.1, 
+  ar1 = rep(0, constants$yrmax))}
+## Model
+model <- nimbleModel(code = modelcode, constants = constants, 
+  inits = inits(),  data = dat, buildDerivs = TRUE) ## Turn on or off AD.
+
+cmodel <- compileNimble(model)
+modLaplace <- buildLaplace(model)
+cmodLaplace <- compileNimble(modLaplace, project = model)
+
+MLE <- cmodLaplace$findMLE()
+summ1 <- cmodLaplace$summary(MLE)
+## or 
+summ2 <- summaryLaplace(cmodLaplace, MLE)
+summ1$params
+summ2$params
+
+## Quick compare with MCMC version:
+conf <- configureMCMC(model)
+mcmc <- buildMCMC(conf)
+cmodel <- compileNimble(model)
+cmcmc <- compileNimble(mcmc, project = model)
+cmcmc$run(100000)
+mvSamples <- cmcmc$mvSamples
+samples <- as.matrix(mvSamples)
+out <- coda::mcmc(samples[-(1:5000),])	# Burn in
+mcmc.sum <- do.call("cbind", summary(out))
+```
+

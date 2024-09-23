@@ -1,0 +1,672 @@
+<!DOCTYPE html>
+<html lang="" xml:lang="">
+  <head>
+    <title>Methods using RTMB and Nimble in Fisheries</title>
+    <meta charset="utf-8" />
+    <meta name="author" content="Paul van Dam-Bates" />
+    <script src="libs/header-attrs-2.25/header-attrs.js"></script>
+    <link rel="stylesheet" href="xaringan-themer.css" type="text/css" />
+    <link rel="stylesheet" href="theme.css" type="text/css" />
+  </head>
+  <body>
+    <textarea id="source">
+class: center, middle, inverse, title-slide
+
+.title[
+# Methods using RTMB and Nimble in Fisheries
+]
+.subtitle[
+## Pacific Stock Assessment Renewal Workshop Series
+]
+.author[
+### Paul van Dam-Bates
+]
+.date[
+### September 2024
+]
+
+---
+
+
+&lt;!-- Build with: xaringan::inf_mr() --&gt;
+
+
+
+
+
+# Part I: Introduction to RTMB
+
+---
+
+# Basic Example
+
+
+```r
+data(ChickWeight)
+```
+
+Consider chick weight data where `\(w\)` = weight, `\(t\)` = time, `\(k\)` = chick, and `\(D\)` = diet. 
+
+`$$w_i = \beta_0 + \beta_t t_i + \beta_{D_i}+ \epsilon_i.$$`
+
+In this case, 
+
+.xsmall[
+`$$\epsilon_i \sim \text{normal}(\mu_i, \sigma^2),$$`
+]
+
+where 
+
+.xsmall[
+`$$\mu_i = \beta_0 + \beta_t t_i + \beta_{D_i}.$$`
+]
+
+---
+
+# Coding a factor
+
+1. Levels 2-4 are coded as level 1 (Intercept) + difference.
+
+
+```r
+  Design1 &lt;- matrix(0, nrow = nrow(ChickWeight), ncol = 4)
+  Design1[cbind(1:nrow(ChickWeight), ChickWeight$Diet)] &lt;- 1
+  Design1[,1] &lt;- 1  ## All observations get Intercept.
+  Design1 &lt;- cbind(Design1, ChickWeight$Time)
+```
+
+2. Each diet gets a different Intercept.
+
+
+```r
+  Design2 &lt;- matrix(0, nrow = nrow(ChickWeight), ncol = 4)
+  Design2[cbind(1:nrow(ChickWeight), ChickWeight$Diet)] &lt;- 1
+  Design2 &lt;- cbind(Design2, ChickWeight$Time)
+```
+
+---
+
+# Constructing a log-likelihood
+
+- The probability density function for an observed weight is
+
+.xsmall[
+$$
+  f(w_i|\mathbf{\theta}) = \text{normal}(\mu_i, \sigma^2)
+$$
+]
+
+- The likelihood is then the product of the densities, `\(f(\cdot)\)`, over all `\(n\)` observations,
+
+.xsmall[
+$$
+L(\mathbf{\theta}|\mathbf{w}) = \prod_{i=1}^n f(w_i|\mathbf{\theta}).
+$$
+]
+
+---
+
+# Constructing a log-likelihood
+
+- We work on the log-scale as probabilities become small and tend to underflow, creating numerical issues. This leads to the sum of the log of each observed density `\(f\)`,
+
+$$
+l(\mathbf{\theta}|\mathbf{w}) = log(L(\mathbf{\theta}|\mathbf{w})) = \sum_{i=1}^n log(f(w_i|\mathbf{\theta})).
+$$
+
+- Functions like `optim` or `nlminb` that do optimization in R seek to MINIMIZE the function as a default. For maximum likelihood estimation, we want to find the maximum of `\(l(\mathbf{\theta}|\mathbf{w})\)`, or the minimum of `\(-l(\mathbf{\theta}|\mathbf{w})\)`.
+
+---
+
+# Code the negative log-likelihood
+
+
+```r
+  ## Parameters are coefficients in the design matrix and variance sigma:
+  fn &lt;- function(par){
+    beta &lt;- par[1:ncol(X)]  ## X is Design Matrix
+    sigma &lt;- exp(par[ncol(X)+1])  ## Is this necessary?
+    ## Do yourself...
+  }
+```
+
+
+
+```r
+fit &lt;- lm(weight ~ Diet + Time, data = ChickWeight)
+fit2 &lt;- nlminb(c(rep(0, ncol(Design1)),0), fn)
+coef(fit) - fit2$par[1:ncol(Design1)]
+#&gt;   (Intercept)         Diet2         Diet3         Diet4          Time 
+#&gt;  4.646846e-05  7.071605e-04  1.248335e-03 -1.866777e-03 -4.837374e-06
+sigma(fit) - exp(fit2$par[ncol(Design1)+1])
+#&gt; [1] 0.1560229
+```
+
+---
+
+# Why RTMB
+
+- Speed - Makes R run in C++
+
+
+```r
+  library(RTMB)
+  pars &lt;-  c(rep(0, ncol(Design1)),0)
+  obj &lt;- MakeADFun(fn, pars, silent = TRUE)
+  microbenchmark::microbenchmark(
+      rtmb = obj$fn(pars),
+      baseR = fn(pars))
+#&gt; Unit: microseconds
+#&gt;   expr  min   lq   mean median   uq   max neval cld
+#&gt;   rtmb  5.4  5.7  7.100    5.9  6.1 106.9   100  a 
+#&gt;  baseR 27.8 28.2 31.076   28.4 29.2 145.1   100   b
+```
+
+---
+
+# Why RTMB
+
+- Automatic Differentiation - Accurate!
+
+
+
+
+```r
+## Finite Difference vs AD
+gr_true(fit2$par) - pracma::jacobian(obj$fn, fit2$par)
+#&gt;               [,1]          [,2]         [,3]          [,4]          [,5]
+#&gt; [1,] -1.021965e-07 -7.144184e-08 5.460247e-08 -2.245381e-08 -2.458391e-07
+#&gt;              [,6]
+#&gt; [1,] 0.0002510652
+gr_true(fit2$par) - obj$gr(fit2$par)
+#&gt;              [,1]          [,2]         [,3]         [,4]         [,5]
+#&gt; [1,] 1.542549e-16 -7.058156e-17 4.716279e-17 5.076777e-17 9.178422e-15
+#&gt;              [,6]
+#&gt; [1,] 0.0002510806
+```
+
+---
+
+# Why RTMB
+
+- Automatic Differentiation - Accurate!
+- Automatic Differentiation - Fast!
+
+
+```r
+microbenchmark::microbenchmark(
+      rtmb = obj$gr(fit2$par),
+      baseR = pracma::jacobian(obj$fn, fit2$par))
+#&gt; Unit: microseconds
+#&gt;   expr   min     lq    mean median    uq   max neval cld
+#&gt;   rtmb  26.0  28.75  36.571  36.55  38.8 116.5   100  a 
+#&gt;  baseR 193.4 203.95 224.646 209.95 216.7 666.1   100   b
+```
+
+---
+
+# Why do derviatives matter?
+
+1. Helps us find the maximum/minimum, when the gradient (vector of partial derivatives) is zero.
+1. The variance is defined by the inverse of the Hessian (of the negative log likelihood). Hessian is the derivative of the derivative.
+1. Finite difference methods are very slow and often inaccurate.
+1. Automatic differentiation can be faster than analytically defined gradients due to the building of a tape. The tape is an efficient set of rules for a chain rule where a lot of the algebra is pre-computed as constants (when building the tape).
+---
+
+# The Laplace Approximation
+
+- The Laplace approximation approximately integrates "normal looking" likelihood surfaces by a single point evaluation at the mode.
+- Consider the above Chick Weights problem with a random effect per chick.
+
+
+```r
+  library(glmmTMB)
+  fit.glmm &lt;- glmmTMB(weight ~ Diet + Time + (1|Chick), data = ChickWeight)
+  fixef(fit.glmm)
+#&gt; 
+#&gt; Conditional model:
+#&gt; (Intercept)        Diet2        Diet3        Diet4         Time  
+#&gt;      11.231       16.218       36.550       30.030        8.718
+```
+---
+
+# New Log-Likelihood
+
+- Each random-effect, `\(u_k\)` is assumed to be normally distributed with mean 0, and variance `\(\sigma_{re}^2\)`.
+
+- The contribution for the random-effects for `\(N\)` chicks is then,
+
+.xsmall[
+$$
+f(\mathbf{u}|\boldsymbol{\theta}) = \prod_{k=1}^N f(u_k|\boldsymbol{\theta})
+$$
+]
+
+- The change in the log-likelihood happens to the expected value of each observation,
+
+`$$\mu_i = \beta_0 + \beta_t t_i + \beta_{D_i} + u_{chick_i}$$`
+
+
+---
+
+# New Log-Likelihood
+
+- The new likelihood is then
+
+.xsmall[
+`$$L(\boldsymbol{\theta}|\mathbf{w},\mathbf{u}) = f(\mathbf{u}|\boldsymbol{\theta}) \prod_{i=1}^n f(w_i|u_{chick_i}, \boldsymbol{\theta}).$$`
+]
+
+- The log-likelihood is defined as the sum over the log observed densities plus, the sum of the random effect densities,
+
+`$$l(\boldsymbol{\theta}|\mathbf{w},\mathbf{u}) = \sum_{k=1}^N log(f(u_i|\boldsymbol{\theta})) + \sum_{k=i}^n log(f(w_i|u_{chick_i}, \boldsymbol{\theta})).$$`
+
+---
+
+
+```r
+  ChickWeight$chick &lt;- as.integer(as.character(ChickWeight$Chick))
+  pars.re &lt;- list(beta = rep(0, ncol(Design1)),
+                  logsigma = 0, logsigmare = 0,
+                  re = rep(0, max(ChickWeight$chick)))
+  ## Parameters are coefficients in the design matrix and variance sigma:
+  fn &lt;- function(par){
+    getAll(par)
+    sigma &lt;- exp(logsigma)
+    sigmare &lt;- exp(logsigmare)
+    mu &lt;- Design1 %*% beta + re[as.numeric(ChickWeight$Chick)]
+    ADREPORT(sigma)
+    ADREPORT(sigmare)
+    negll &lt;- sum(-dnorm(ChickWeight$weight, mu, sigma, log = TRUE)) 
+    negll &lt;- negll - sum(dnorm(re, 0, sigmare, log = TRUE))
+    negll
+  }
+  obj &lt;- MakeADFun(fn, parameters=pars.re, silent = TRUE)
+  fit.re &lt;- nlminb(obj$par, obj$fn, obj$gr)
+  sdreport(obj)
+```
+
+---
+
+# Laplace Continued
+
+- To actually make inference we need to marginalize out the `\(N\)` unobserved random effects, `\(\mathbf{u}\)`.
+
+.xsmall[
+`$$f(\mathbf{w}|\mathbf{\theta}) = \int_{-\infty}^\infty \cdots \int_{-\infty}^\infty f(\mathbf{w}| \mathbf{u}, \mathbf{\theta}) f(\mathbf{u} | \mathbf{\theta}) du_{1} \cdots d_{N}.$$`
+]
+
+- This is an N dimensional integral, which in this particular case, can be written as `\(N\)` single dimension integrals as each chick is independent.
+
+- Works well when this likelihood is unimodal (has one maximum) and looks roughly normal locally. Actually EXACT in the example.
+
+---
+
+# Laplace Continued
+
+- The Laplace approximation works by creating a Normal distribution that looks kind of like the posterior distribution of the random-effects we are integrating out,
+.xsmall[
+`$$f_G(\mathbf{u}|\mathbf{w}, \mathbf{\theta}) \approx \text{Multivariate-Normal}(\widehat{\mathbf{u}}, H_{\widehat{u}}^{-1}).$$`
+]
+
+- Then, evaluated at the mean,
+
+.xsmall[
+`$$f_G(\widehat{\mathbf{u}} | \mathbf{w}, \mathbf{\theta}) = \frac{det(H_\widehat{u})^{0.5}}{(2\pi)^{N/2}}$$`
+]
+
+- The Laplace approximation is then,
+
+.xsmall[
+`$$f(\mathbf{w}|\mathbf{\theta}) \approx  f(\mathbf{w}| \mathbf{u}, \mathbf{\theta}) f(\mathbf{u} | \mathbf{\theta})/ f_G(\widehat{\mathbf{u}} | \mathbf{w}, \mathbf{\theta})$$`
+]
+
+---
+
+# Laplace Continued
+
+- The recipe is for Laplace is then to find `\(\widehat{\mathbf{u}}\)` for some value of `\(\boldsymbol{\theta}\)`, and then find the Hessian `\(H_{\widehat{u}}\)` and calculate,
+
+`$$l(\boldsymbol{\theta}|\mathbf{w}) \approx \frac{N}{2}log(2\pi) - log(det(H_{\widehat{u}})) + l(\boldsymbol{\theta}|\mathbf{w},\widehat{\mathbf{u}})$$`
+
+- Let's do it in RTMB now manually.
+
+---
+
+# RTMB Laplace
+
+
+```r
+  nre &lt;- max(ChickWeight$chick)
+  obj.re &lt;- MakeADFun(fn, parameters = pars.re, silent = TRUE, 
+      map = list(beta = factor(rep(NA, ncol(Design1))), 
+        logsigma = factor(NA), 
+        logsigmare = factor(NA)))
+  fit.re.only &lt;- nlminb(obj.re$par, obj.re$fn, obj.re$gr)
+  
+  laplace_approx &lt;- -nre*log(2*pi) + 
+      log(det(obj.re$he(fit.re.only$par))) +   obj.re$fn(fit.re.only$par)
+  
+  obj.laplace &lt;- MakeADFun(fn, parameters = pars.re, 
+                            silent = TRUE, random = "re")
+  obj.laplace$fn(obj.laplace$par) - laplace_approx
+  obj.laplace$env$last.par[-(1:(ncol(Design1)+2))] - fit.re.only$par
+```
+
+---
+
+# RTMB Laplace
+
+
+```r
+
+  fit.laplace &lt;- nlminb(obj.laplace$par, obj.laplace$fn, obj.laplace$gr)
+  fit.laplace$par[1:ncol(Design1)] - fixef(fit.glmm)[[1]] ## Matched it.
+```
+
+---
+
+# Exercises
+
+Choose one of:
+
+1. Write a general RTMB function that does Laplace manually.
+1. Find an example where you don't think Laplace will work well.
+
+---
+
+# Part II: Stock-Recruit Example
+
+---
+
+# Ricker Curve
+
+- Consider a Ricker stock recruit relationship for salmon, where `\(R_t\)` is recruitment from year `\(t\)` spawners `\(S_t\)`,
+
+`$$R_t = \alpha S_t e^{-\beta S_t}$$`
+- As a linear equation,
+`$$log(R_t/S_t) = log(\alpha) - \beta S_t$$`
+
+- Install `samEst` from https://github.com/Pacific-salmon-assess/samEst/tree/main
+- We will use `data(harck)` from the samest package for this section.
+
+---
+
+# The Basic Linear Model
+
+- Code a linear model for the Harrison Chinook stock-recruitment data using RTMB (assuming Gaussian error structure for log(R/S)).
+- Can you get the same results as `glmmTMB`?
+
+
+```r
+  library(samEst)
+  data(harck)
+  fit.harck &lt;- glmmTMB(logRS ~ S, data=harck)
+  summary(fit.harck)
+```
+
+---
+
+## One Version
+
+
+```r
+  fn &lt;- function(par){
+    getAll(par, harck)
+    beta &lt;- exp(logbeta)
+    sigma &lt;- exp(logsigma)
+
+    Expected_logRS &lt;- logalpha - beta*S
+    negll &lt;- -sum(dnorm(logRS, mean = Expected_logRS, sd = sigma, log = TRUE))
+    ADREPORT(sigma)
+    alpha &lt;- exp(logalpha)
+    ADREPORT(alpha)
+    ADREPORT(beta)
+    return(negll)
+  }
+
+  pars &lt;- list(logalpha = 0, logbeta = 0, logsigma = 0)
+  obj &lt;- MakeADFun(fn, pars, silent = TRUE)
+  fit &lt;- nlminb(obj$par, obj$fn, obj$gr)
+  sdrep &lt;- sdreport(obj)  ## All the values
+  summary(sdrep, "fixed", p.value = TRUE)  
+  summary(sdrep, "report", p.value = TRUE)
+```
+---
+
+# Understanding Variance
+
+- Variance for the parameters being optimized can be written based on the Hessian,
+
+.xsmall[
+`$$V(\boldsymbol{\theta}) = H_\theta^{-1}.$$`
+]
+
+- For a single term, `\(V(log(\alpha)) = V(\boldsymbol{\theta})_{1,1}\)`.
+- Example,
+
+
+```r
+H &lt;- obj$he(fit$par)
+V &lt;- solve(H)
+sqrt(diag(V)) - summary(sdrep, "fixed")[,2]
+```
+---
+
+# Understanding Variance
+
+- What about the transformed variables? RTMB uses the Delta method,
+
+.xsmall[
+`$$V(g(\theta)) \approx \nabla g V(\theta) \nabla g'$$`
+]
+
+
+```r
+  grad &lt;- exp(fit$par)
+  Vg &lt;- t(grad %*% V) %*% grad
+  sqrt(diag(Vg)) - summary(sdrep, "report")[c("alpha", "beta", "sigma"),2]
+```
+- By now it should be really clear that if we can write fast code that efficiently returns derivatives, inference is pretty easy.
+
+---
+
+# Excersizes
+
+- Write an auto regressive process for the `harck` data in RTMB.
+- Calculate and generate confidence intervals for maximum sustainable yield ( `\(S_{msy}\)` ) and for the number of spawners needed to return to `\(S_{msy}\)` in one generation, `\(S_{gen}\)` .
+
+
+- Example: https://github.com/Pacific-salmon-assess/samEst/blob/main/R/LamW_RTMB.r
+
+
+
+---
+
+# RTMB Tricks - ADJoint
+
+- If you know the derivative then you can use it instead of AD.
+
+
+```r
+x &lt;- rnorm(100, 0.25, 0.1)
+myneg_dnorm &lt;- function(theta){
+  sum(-dnorm(x, theta[1], theta[2], log = TRUE))
+}
+gr_myneg_dnorm &lt;- function(theta, f, df) {
+  deriv &lt;- numeric(2)
+  deriv[1] &lt;- -sum(x-theta[1])/theta[2]^2
+  deriv[2] &lt;- length(x)/theta[2] - sum((x-theta[1])^2)/theta[2]^3
+  df * deriv ## Not sure if I need the df...
+}
+test &lt;- ADjoint(myneg_dnorm, gr_myneg_dnorm )
+grtest &lt;- MakeTape(test, c(0,1))
+fad &lt;- MakeTape(myneg_dnorm, c(0,1))
+fad$jacobian(c(0,1)) - grtest$jacobian(c(0,1))
+```
+
+
+---
+
+# RTMB Tricks - Update Data
+
+- Update data without running MakeADFun again.
+
+
+```r
+f &lt;- function(p) {
+    getDat &lt;- function(x) {
+        .GlobalEnv$mydat
+    }
+    empty &lt;- advector(rep(0, 0)) ## Important this is empty but ad variable...
+    ## Add R function to the AD tape
+    y &lt;- DataEval(getDat, empty)
+    -sum(dnorm(y, p$mu, p$sd, log=TRUE))
+}
+mydat &lt;- rnorm(10000, 0, 10)
+obj &lt;- MakeADFun(f, list(mu=0, sd=1), silent = TRUE)
+fit1 &lt;- nlminb(obj$par, obj$fn, obj$gr)
+mydat &lt;- rnorm(10000, 10, 1)
+fit2 &lt;- nlminb(obj$par, obj$fn, obj$gr)
+fit1$par
+fit2$par
+```
+
+---
+
+# Now for Nimble...
+    </textarea>
+<style data-target="print-only">@media screen {.remark-slide-container{display:block;}.remark-slide-scaler{box-shadow:none;}}</style>
+<script src="https://remarkjs.com/downloads/remark-latest.min.js"></script>
+<script>var slideshow = remark.create({
+"highlightLines": true,
+"countIncrementalSlides": false
+});
+if (window.HTMLWidgets) slideshow.on('afterShowSlide', function (slide) {
+  window.dispatchEvent(new Event('resize'));
+});
+(function(d) {
+  var s = d.createElement("style"), r = d.querySelector(".remark-slide-scaler");
+  if (!r) return;
+  s.type = "text/css"; s.innerHTML = "@page {size: " + r.style.width + " " + r.style.height +"; }";
+  d.head.appendChild(s);
+})(document);
+
+(function(d) {
+  var el = d.getElementsByClassName("remark-slides-area");
+  if (!el) return;
+  var slide, slides = slideshow.getSlides(), els = el[0].children;
+  for (var i = 1; i < slides.length; i++) {
+    slide = slides[i];
+    if (slide.properties.continued === "true" || slide.properties.count === "false") {
+      els[i - 1].className += ' has-continuation';
+    }
+  }
+  var s = d.createElement("style");
+  s.type = "text/css"; s.innerHTML = "@media print { .has-continuation { display: none; } }";
+  d.head.appendChild(s);
+})(document);
+// delete the temporary CSS (for displaying all slides initially) when the user
+// starts to view slides
+(function() {
+  var deleted = false;
+  slideshow.on('beforeShowSlide', function(slide) {
+    if (deleted) return;
+    var sheets = document.styleSheets, node;
+    for (var i = 0; i < sheets.length; i++) {
+      node = sheets[i].ownerNode;
+      if (node.dataset["target"] !== "print-only") continue;
+      node.parentNode.removeChild(node);
+    }
+    deleted = true;
+  });
+})();
+// add `data-at-shortcutkeys` attribute to <body> to resolve conflicts with JAWS
+// screen reader (see PR #262)
+(function(d) {
+  let res = {};
+  d.querySelectorAll('.remark-help-content table tr').forEach(tr => {
+    const t = tr.querySelector('td:nth-child(2)').innerText;
+    tr.querySelectorAll('td:first-child .key').forEach(key => {
+      const k = key.innerText;
+      if (/^[a-z]$/.test(k)) res[k] = t;  // must be a single letter (key)
+    });
+  });
+  d.body.setAttribute('data-at-shortcutkeys', JSON.stringify(res));
+})(document);
+(function() {
+  "use strict"
+  // Replace <script> tags in slides area to make them executable
+  var scripts = document.querySelectorAll(
+    '.remark-slides-area .remark-slide-container script'
+  );
+  if (!scripts.length) return;
+  for (var i = 0; i < scripts.length; i++) {
+    var s = document.createElement('script');
+    var code = document.createTextNode(scripts[i].textContent);
+    s.appendChild(code);
+    var scriptAttrs = scripts[i].attributes;
+    for (var j = 0; j < scriptAttrs.length; j++) {
+      s.setAttribute(scriptAttrs[j].name, scriptAttrs[j].value);
+    }
+    scripts[i].parentElement.replaceChild(s, scripts[i]);
+  }
+})();
+(function() {
+  var links = document.getElementsByTagName('a');
+  for (var i = 0; i < links.length; i++) {
+    if (/^(https?:)?\/\//.test(links[i].getAttribute('href'))) {
+      links[i].target = '_blank';
+    }
+  }
+})();
+// adds .remark-code-has-line-highlighted class to <pre> parent elements
+// of code chunks containing highlighted lines with class .remark-code-line-highlighted
+(function(d) {
+  const hlines = d.querySelectorAll('.remark-code-line-highlighted');
+  const preParents = [];
+  const findPreParent = function(line, p = 0) {
+    if (p > 1) return null; // traverse up no further than grandparent
+    const el = line.parentElement;
+    return el.tagName === "PRE" ? el : findPreParent(el, ++p);
+  };
+
+  for (let line of hlines) {
+    let pre = findPreParent(line);
+    if (pre && !preParents.includes(pre)) preParents.push(pre);
+  }
+  preParents.forEach(p => p.classList.add("remark-code-has-line-highlighted"));
+})(document);</script>
+
+<script>
+slideshow._releaseMath = function(el) {
+  var i, text, code, codes = el.getElementsByTagName('code');
+  for (i = 0; i < codes.length;) {
+    code = codes[i];
+    if (code.parentNode.tagName !== 'PRE' && code.childElementCount === 0) {
+      text = code.textContent;
+      if (/^\\\((.|\s)+\\\)$/.test(text) || /^\\\[(.|\s)+\\\]$/.test(text) ||
+          /^\$\$(.|\s)+\$\$$/.test(text) ||
+          /^\\begin\{([^}]+)\}(.|\s)+\\end\{[^}]+\}$/.test(text)) {
+        code.outerHTML = code.innerHTML;  // remove <code></code>
+        continue;
+      }
+    }
+    i++;
+  }
+};
+slideshow._releaseMath(document);
+</script>
+<!-- dynamically load mathjax for compatibility with self-contained -->
+<script>
+(function () {
+  var script = document.createElement('script');
+  script.type = 'text/javascript';
+  script.src  = 'https://mathjax.rstudio.com/latest/MathJax.js?config=TeX-MML-AM_CHTML';
+  if (location.protocol !== 'file:' && /^https?:/.test(script.src))
+    script.src  = script.src.replace(/^https?:/, '');
+  document.getElementsByTagName('head')[0].appendChild(script);
+})();
+</script>
+  </body>
+</html>
