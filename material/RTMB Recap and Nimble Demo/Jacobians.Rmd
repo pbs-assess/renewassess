@@ -165,22 +165,33 @@ tru.fn(c(log(10), 0))
 
 ## STAN and RTMB - 
 
-### Setting up prior distributions
+- Setting up prior distributions
 
 ```{r, echo = TRUE, show = "markup"}
+prior_sd <- c(1, 0.5, 1.2, 0.75, 0.1)
 ## Create a general transformation method:
-prior_transforms <- function(theta){
+prior_transform_internal <- function(theta){
   c(theta[1], theta[2], exp(theta[3]), exp(theta[4]), 1/(1+exp(-theta[5])))
 }
-F <- MakeTape(prior_transforms, numeric(5))
-determinant(F$jacobian(numeric(5)), log  = TRUE)
-
+prior_transform <- MakeTape(prior_transform_internal, numeric(5))
+dprior_internal <- function(theta){
+  
+  p <- prior_transform(theta)
+  sum(dnorm(p, 0, prior_sd, log=TRUE)) + 
+    determinant(prior_transform$jacobian(theta), log  = TRUE)$modulus
+}
+dprior_log <- MakeTape(dprior_internal, numeric(5))
 ```
 
 - STAN and RTMB interface: get the data out.
 
 ```{r echo = TRUE, show = "markup", eval = FALSE}
 library(tmbstan)
+lamw <- ADjoint(
+  function(x){gsl::lambert_W0(x)},
+  function(x, y, dy) {dy / (x + exp(y))}
+)
+
 fn <- function(par){
   getAll(par, harck)
   ## Requires stupid logistic limit trick to make sure uniform is maintained.
@@ -203,9 +214,9 @@ fn <- function(par){
   negll <- negll - sum(dnorm(logRS, 
                         mean = Expected_logRS, sd = sigma, log = TRUE))
 
-  Smsy <- (1 - LambertW0(exp(1 - log(alpha))))/beta
-  umsy <- (1 - LambertW0(exp(1 - log(alpha))))
-  Sgen <-  -1/beta*LambertW0(-beta*Smsy/alpha)
+  Smsy <- (1 - lamw(exp(1 - log(alpha))))/beta
+  umsy <- (1 - lamw(exp(1 - log(alpha))))
+  Sgen <-  -1/beta*lamw(-beta*Smsy/alpha)
 
   REPORT(Smsy)
   REPORT(umsy)
@@ -226,7 +237,7 @@ fit.stan <- tmbstan(obj, chains=1, iter = 10000,
 post <- as.matrix(fit.stan)
 report <- obj$report()
 post.report <- matrix(0,  nrow = nrow(post), ncol = length(report))
-colnames(post.report) <- names(report)
+colnames(post.report) <- names( do.call('c', report) )
 for( i in 1:nrow(post) )
     post.report[i,] <- do.call('c', 
         obj$report(post[i,seq_along(obj$par)]))
@@ -255,9 +266,9 @@ fn <- function(par){
   negll <- negll - sum(dnorm(logRS, 
                         mean = Expected_logRS, sd = sigma, log = TRUE))
 
-  Smsy <- (1 - LambertW0(exp(1 - log(alpha))))/beta
-  umsy <- (1 - LambertW0(exp(1 - log(alpha))))
-  Sgen <-  -1/beta*LambertW0(-beta*Smsy/alpha)
+  Smsy <- (1 - lamw(exp(1 - log(alpha))))/beta
+  umsy <- (1 - lamw(exp(1 - log(alpha))))
+  Sgen <-  -1/beta*lamw(-beta*Smsy/alpha)
 
   REPORT(Smsy)
   REPORT(umsy)

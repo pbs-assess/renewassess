@@ -11,7 +11,7 @@
 
 <meta name="author" content="Paul van Dam-Bates" />
 
-<meta name="date" content="2024-09-19" />
+<meta name="date" content="2024-09-23" />
 
 <title>Change of Variables + Bayesian Examples</title>
 
@@ -354,7 +354,7 @@ display: none;
 Examples</h1>
 <h3 class="subtitle">Pacific Stock Assessment Renewal</h3>
 <h4 class="author">Paul van Dam-Bates</h4>
-<h4 class="date">2024-09-19</h4>
+<h4 class="date">2024-09-23</h4>
 
 </div>
 
@@ -497,18 +497,31 @@ totally flat on the real scale.</li>
 </div>
 <div id="stan-and-rtmb--" class="section level2">
 <h2>STAN and RTMB -</h2>
-<div id="setting-up-prior-distributions" class="section level3">
-<h3>Setting up prior distributions</h3>
-<pre class="r"><code>## Create a general transformation method:
-prior_transforms &lt;- function(theta){
+<ul>
+<li>Setting up prior distributions</li>
+</ul>
+<pre class="r"><code>prior_sd &lt;- c(1, 0.5, 1.2, 0.75, 0.1)
+## Create a general transformation method:
+prior_transform_internal &lt;- function(theta){
   c(theta[1], theta[2], exp(theta[3]), exp(theta[4]), 1/(1+exp(-theta[5])))
 }
-F &lt;- MakeTape(prior_transforms, numeric(5))
-determinant(F$jacobian(numeric(5)), log  = TRUE)</code></pre>
+prior_transform &lt;- MakeTape(prior_transform_internal, numeric(5))
+dprior_internal &lt;- function(theta){
+  
+  p &lt;- prior_transform(theta)
+  sum(dnorm(p, 0, prior_sd, log=TRUE)) + 
+    determinant(prior_transform$jacobian(theta), log  = TRUE)$modulus
+}
+dprior_log &lt;- MakeTape(dprior_internal, numeric(5))</code></pre>
 <ul>
 <li>STAN and RTMB interface: get the data out.</li>
 </ul>
 <pre class="r"><code>library(tmbstan)
+lamw &lt;- ADjoint(
+  function(x){gsl::lambert_W0(x)},
+  function(x, y, dy) {dy / (x + exp(y))}
+)
+
 fn &lt;- function(par){
   getAll(par, harck)
   ## Requires stupid logistic limit trick to make sure uniform is maintained.
@@ -531,9 +544,9 @@ fn &lt;- function(par){
   negll &lt;- negll - sum(dnorm(logRS, 
                         mean = Expected_logRS, sd = sigma, log = TRUE))
 
-  Smsy &lt;- (1 - LambertW0(exp(1 - log(alpha))))/beta
-  umsy &lt;- (1 - LambertW0(exp(1 - log(alpha))))
-  Sgen &lt;-  -1/beta*LambertW0(-beta*Smsy/alpha)
+  Smsy &lt;- (1 - lamw(exp(1 - log(alpha))))/beta
+  umsy &lt;- (1 - lamw(exp(1 - log(alpha))))
+  Sgen &lt;-  -1/beta*lamw(-beta*Smsy/alpha)
 
   REPORT(Smsy)
   REPORT(umsy)
@@ -554,13 +567,12 @@ fit.stan &lt;- tmbstan(obj, chains=1, iter = 10000,
 post &lt;- as.matrix(fit.stan)
 report &lt;- obj$report()
 post.report &lt;- matrix(0,  nrow = nrow(post), ncol = length(report))
-colnames(post.report) &lt;- names(report)
+colnames(post.report) &lt;- names( do.call(&#39;c&#39;, report) )
 for( i in 1:nrow(post) )
     post.report[i,] &lt;- do.call(&#39;c&#39;, 
         obj$report(post[i,seq_along(obj$par)]))
 
 summary(coda::mcmc(post.report))</code></pre>
-</div>
 </div>
 
 

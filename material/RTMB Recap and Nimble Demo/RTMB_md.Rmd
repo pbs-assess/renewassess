@@ -504,6 +504,10 @@ fit1$par
 fit2$par
 ```
 
+### ADjoint using custom distributions:
+
+
+
 ### What AD doesn't like
 
 - We can't condition the likelihood based on an AD variable. For example,
