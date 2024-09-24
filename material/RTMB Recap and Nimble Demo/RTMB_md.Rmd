@@ -51,7 +51,7 @@ $$w_i = \beta_0 + \beta_t t_i + \beta_{D_i}+ \epsilon_i.$$
 
 In this case, 
 
-$$\epsilon_i \sim \text{normal}(\mu_i, \sigma^2),$$
+$$\epsilon_i \sim \text{normal}(0, \sigma^2),$$
 
 where 
 
@@ -205,11 +205,11 @@ $$\mathbf{J} = (\nabla f_1, \ldots, \nabla f_K).$$
 5. For a likelihood, we will only ever have a single output, and so generally minimize the gradient, but that is specific version of a Jacobian.
 
 6. Key piece of theory for transformations: if $\mathbf{y} = g(\mathbf{x})$, then using transformation of variables,
-$$f_y(\mathbf{y}) = f_x(g^{-1}(\mathbf{x})) |\mathbf{J}_{g^{-1}(x)}|$$
+$$f_y(\mathbf{y}) = f_x(g^{-1}(\mathbf{y})) |\mathbf{J}_{g^{-1}(\mathbf{y})}|$$
 Example: lognormal distribution:
 Normal Distribution: 
 $$f(x) = \frac{1}{\sqrt{2\pi}\sigma}\text{exp}\Big(-\frac{(x-\mu)^2}{2\sigma^2}\Big)$$
-Then if we want $y = exp(x)$, then $J = \frac{d \text{exp}(x)}{d x}$ and the density becomes,
+Then if we want $y = exp(x)$, then $J = \frac{d \text{log}(y)}{d y}$ and the density becomes,
 $$f(y) = \frac{1}{\sqrt{2\pi}\sigma y}\text{exp}\Big(-\frac{(log(y)-\mu)^2}{2\sigma^2}\Big)$$
 ```{r, echo = TRUE, show = "markup"}
 ## Log transform
@@ -223,7 +223,7 @@ dlognorm <- function(x, mean, sigma){
   return(ans)
 }
 y <- seq(0, 10, by = 0.1)
-plot(y, dlognorm(x=y, 0, 1), xlab = "y", ylab = "density - lognormal", type = 'l')
+plot(y, dlognorm(x=y, 0, 1), xlab = "y", ylab = "lognormal density", type = 'l')
 
 ## Logit Transform
 logittransform <- MakeTape(function(x){return(log(x/(1-x)))}, 0) ## go from (0,1) -> (-inf, inf)
@@ -238,7 +238,7 @@ dlogitnorm <- function(x, mean, sigma){
 }
 p <- seq(0.0001,0.999,0.01)
 plot(p, dlogitnorm(x=p, 0, 1), xlab = "p", 
-  ylab = "density - logitnormal", type = 'l')
+  ylab = "logitnormal density", type = 'l')
 ```
 
 ---

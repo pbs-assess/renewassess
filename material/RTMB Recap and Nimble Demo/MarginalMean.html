@@ -479,7 +479,10 @@ obj &lt;- MakeADFun(nll, parameters = list(logsdre = 0, loglambda = 0,
   re = rep(0, max(dat$id))), silent = TRUE, random = &quot;re&quot;)
 fit1 &lt;- nlminb(obj$par, obj$fn, obj$gr)
 sdrep1 &lt;- sdreport(obj)
-summary(sdrep1, &quot;report&quot;)</code></pre>
+summary(sdrep1, &quot;report&quot;)
+
+#sdrep2 &lt;- sdreport(obj, bias.correct = TRUE, bias.correct.control = list(sd = TRUE))
+#summary(sdrep2, &quot;report&quot;)</code></pre>
 <ul>
 <li>A good paper on this topic to consider reading is “A class of
 generalized linear mixed models adjusted for marginal interpretability”
