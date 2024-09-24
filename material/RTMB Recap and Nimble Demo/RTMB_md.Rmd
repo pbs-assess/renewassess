@@ -223,7 +223,7 @@ dlognorm <- function(x, mean, sigma){
   return(ans)
 }
 y <- seq(0, 10, by = 0.1)
-plot(y, dlognorm(x=y, 0, 1), xlab = "y", ylab = "density - lognormal", type = 'l')
+plot(y, dlognorm(x=y, 0, 1), xlab = "y", ylab = "lognormal density", type = 'l')
 
 ## Logit Transform
 logittransform <- MakeTape(function(x){return(log(x/(1-x)))}, 0) ## go from (0,1) -> (-inf, inf)
@@ -238,7 +238,7 @@ dlogitnorm <- function(x, mean, sigma){
 }
 p <- seq(0.0001,0.999,0.01)
 plot(p, dlogitnorm(x=p, 0, 1), xlab = "p", 
-  ylab = "density - logitnormal", type = 'l')
+  ylab = "logitnormal density", type = 'l')
 ```
 
 ---
