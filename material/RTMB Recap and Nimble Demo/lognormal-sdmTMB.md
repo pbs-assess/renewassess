@@ -62,7 +62,7 @@ exp(log(p) + phi^2/2)
 #> [1] 90.38351
 
 # and so the lognormal behaves like other distributions by 'baking' in the 
-# adjustment
+# adjustment with an identical sum of log likelihoods either way
 
 fit <- sdmTMB(
   density ~ 1,
