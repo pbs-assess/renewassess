@@ -11,7 +11,7 @@
 
 <meta name="author" content="Paul van Dam-Bates" />
 
-<meta name="date" content="2024-09-23" />
+<meta name="date" content="2024-09-26" />
 
 <title>Change of Variables + Bayesian Examples</title>
 
@@ -354,7 +354,7 @@ display: none;
 Examples</h1>
 <h3 class="subtitle">Pacific Stock Assessment Renewal</h3>
 <h4 class="author">Paul van Dam-Bates</h4>
-<h4 class="date">2024-09-23</h4>
+<h4 class="date">2024-09-26</h4>
 
 </div>
 
@@ -370,7 +370,7 @@ f_x(g^{-1}(\mathbf{x})) |\mathbf{J}_{g^{-1}(x)}|.\]</span></p>
 <p>Let’s start with the simplest version we are familiar with where
 <span class="math inline">\(x\)</span> is a standard normal
 distribution, <span class="math display">\[ f_x(x) =
-\frac{1}{\sqrt{2\pi}}e^{-0.5x^2}. \]</span> Then, if <span class="math inline">\(y = \mu + z\sigma\)</span>, then</p>
+\frac{1}{\sqrt{2\pi}}e^{-0.5x^2}. \]</span> Then, if <span class="math inline">\(y = \mu + x\sigma\)</span>, then</p>
 <p><span class="math display">\[ f_y(y) = f_x((y - \mu)/\sigma) \times
 1/\sigma =
 \frac{1}{\sqrt{2\pi}\sigma}e^{-0.5\big(\frac{y-\mu}{\sigma}\big)^2}.\]</span></p>
@@ -378,22 +378,24 @@ distribution, <span class="math display">\[ f_x(x) =
 <div id="but-when-do-i-need-jacobians" class="section level2">
 <h2>But when do I need Jacobians?</h2>
 <ol style="list-style-type: decimal">
-<li>Is your variable being transformed a RANDOM VARIABLE? Yes? Then you
-need a Jacobian.</li>
+<li>Is your variable being transformed a RANDOM VARIABLE? Yes? And you
+are calculating the density in terms of the transformed variable? Then
+you need a Jacobian.</li>
 </ol>
 <p>Example 1, you are running a linear model and need to transform <span class="math inline">\(\theta = log(\sigma)\)</span>, so that we can fit
 <span class="math inline">\(\theta\)</span> for computational reasons
 doing maximum likelihood estimation. Do you need to do a transformation
 of variables?</p>
 <p>Example 2, it is the same situation, however you are going to find
-the posterior distribution. You assume that <span class="math inline">\(\sigma \sim \text{gamma}(\alpha, \beta)\)</span>.
-a. You are using MCMC and a Gibbs sampler to sample <span class="math inline">\(\sigma\)</span>.</p>
+the posterior distribution. You assume that <span class="math inline">\(\sigma \sim \text{gamma}(\alpha,
+\beta)\)</span>.</p>
 <ol style="list-style-type: lower-alpha">
+<li><p>You are using MCMC and a Gibbs sampler to sample <span class="math inline">\(\sigma\)</span>.</p></li>
 <li><p>You are using MCMC and applying a standard Metropolis Hastings
 random walk.</p></li>
 <li><p>You are using STAN and HMC to sample <span class="math inline">\(\sigma\)</span> with a constraint applied to the
 STAN argument.</p></li>
-<li><p>You are using STAN and HMC to sample <span class="math inline">\(log(\sigma)\)</span>.</p></li>
+<li><p>You are using RTMB and STAN and HMC to sample <span class="math inline">\(log(\sigma)\)</span>.</p></li>
 <li><p>You are just finding the maximum a posterior mode (MAP) of <span class="math inline">\(log(\sigma)\)</span>.</p></li>
 </ol>
 <p>Example 3, you are using a <span class="math inline">\(u \sim
@@ -547,10 +549,12 @@ fn &lt;- function(par){
   Smsy &lt;- (1 - lamw(exp(1 - log(alpha))))/beta
   umsy &lt;- (1 - lamw(exp(1 - log(alpha))))
   Sgen &lt;-  -1/beta*lamw(-beta*Smsy/alpha)
-
+  references &lt;- c(Smsy, umsy, Sgen)
+  
   REPORT(Smsy)
   REPORT(umsy)
   REPORT(Sgen)
+  REPORT(references)
   REPORT(sigma)
   REPORT(alpha)
   REPORT(beta)
@@ -565,14 +569,14 @@ fit.stan &lt;- tmbstan(obj, chains=1, iter = 10000,
 
 ## Let&#39;s get posterior samples for all our REPORTS.
 post &lt;- as.matrix(fit.stan)
-report &lt;- obj$report()
-post.report &lt;- matrix(0,  nrow = nrow(post), ncol = length(report))
-colnames(post.report) &lt;- names( do.call(&#39;c&#39;, report) )
+post.report &lt;- NULL
 for( i in 1:nrow(post) )
-    post.report[i,] &lt;- do.call(&#39;c&#39;, 
-        obj$report(post[i,seq_along(obj$par)]))
+    post.report &lt;- rbind(post.report, 
+        unlist(obj$report(post[i,seq_along(obj$par)])))
 
-summary(coda::mcmc(post.report))</code></pre>
+sum.out &lt;- summary(coda::mcmc(post.report))
+summary &lt;- data.frame(do.call(&#39;cbind&#39;, sum.out))
+summary$params &lt;- rownames(summary)</code></pre>
 </div>
 
 

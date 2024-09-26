@@ -74,12 +74,12 @@ Let's fit the same linear model as the previous section but with Nimble.
 ```{r mod1, echo = TRUE, show = 'markup', eval = FALSE}
 modelcode <- nimbleCode({
   ## Make some priors. These give bounds for parameter transformations.
-  ## for( i in 1:nfixef ) beta[i] ~ dnorm(0,1)
-  ## sigma ~ dgamma(1,1)
+  for( i in 1:nfixef ) beta[i] ~ dnorm(0,1)
+  sigma ~ dgamma(1,1)
   
   ## Parameter bounds:
-  for( i in 1:nfixef ) beta[i] ~ dflat() #(-inf, inf)
-  sigma ~ dhalfflat()                    #(0, inf)
+  ##for( i in 1:nfixef ) beta[i] ~ dflat() #(-inf, inf)
+  ##sigma ~ dhalfflat()                    #(0, inf)
   
   ## Build the Likelihood
   for (i in 1:n){
@@ -224,7 +224,9 @@ c(coef(fit.lm), sigma(fit.lm)) - obj$inverse(fit$par)
 Just like in RTMB, we might want to get the variance estimates by finding the inverse of the Hessian. Let's write a function to do that now and also the Delta method that TMB uses.
 
 ```{r nfgr, echo = TRUE, show = 'markup', eval = FALSE}
-## Now let's build the likelihood using a Nimble Function:
+## Adding in the Hessian and some other helpers.
+## Note that we added in the extra tape reset and penalties during the meeting.
+## I have also added the jacobian as an additional arugment.
 fn <- nimbleFunction(
   setup = function(model, paramNodes){    ## Executed purely in R before compilation.
     ## Clean up node names.
@@ -240,22 +242,31 @@ fn <- nimbleFunction(
     # Create a parameter transformation between original and unconstrained
     # parameter spaces.
     transformer <- parameterTransform(model, paramNodes)
+
+    resetTape1 <- TRUE
+    resetTape2 <- TRUE
   },
   #run = function(){},
   methods = list(
-    neg_logLikelihood = function(ptrans = double(1)) {
+    neg_logLikelihood = function(ptrans = double(1), penalized = logical(0, default = FALSE), 
+      jacobian = logical(0, default = FALSE)) {
       ## Objective function for optim/or nlminb,
       ## using transformed parameter space.
       p <- transformer$inverseTransform(ptrans)
       values(model, paramNodes) <<- p
-      return(-model$calculate(calcNodes))
+      negll <- -model$calculate(calcNodes)
+      if(penalized) negll <- negll - model$calculate(paramNodes)
+      if(jacobian) negll <- negll - transformer$logDetJacobian(ptrans)
+      return(negll)
       returnType(double())
     },
-    gr_neg_logLikelihood = function(ptrans = double(1)) {
+    gr_neg_logLikelihood = function(ptrans = double(1), penalized = logical(0, default = FALSE),
+      jacobian = logical(0, default = FALSE)) {
       ## Gradient of neg log likelihood
-      d <- derivs(neg_logLikelihood(ptrans), wrt = 1:length(ptrans), order = 1,
+      d <- derivs(neg_logLikelihood(ptrans, penalized, jacobian), wrt = 1:length(ptrans), order = 1,
                   model = model, updateNodes = updateNodes,
-                  constantNodes = constantNodes)
+                  constantNodes = constantNodes, reset = resetTape1)
+      resetTape1 <<- FALSE
       return(d$jacobian[1,])
       returnType(double(1))
     },
@@ -263,9 +274,12 @@ fn <- nimbleFunction(
       return(transformer$inverseTransform(ptrans))
       returnType(double(1))
     },
-    hessian = function(ptrans = double(1)){
+    hessian = function(ptrans = double(1), penalized = logical(0, default = FALSE),
+      jacobian = logical(0, default = FALSE)){
       ## Gradient of the gradient of neg log likelihood (hessian)
-      d <- derivs(gr_neg_logLikelihood(ptrans), wrt = 1:length(ptrans), order = 1)
+      d <- derivs(gr_neg_logLikelihood(ptrans, penalized, jacobian), wrt = 1:length(ptrans), 
+        order = 1, reset = resetTape2)
+      resetTape2 <<- FALSE
       return(d$jacobian)
       returnType(double(2))
     },
@@ -281,6 +295,10 @@ fn <- nimbleFunction(
       gr <- gr_inverse(ptrans)
       vcov_delta <- gr %*% vcov %*% t(gr)
       return(sqrt(diag(vcov_delta)))
+    },
+    resetTape = function(){
+      resetTape1 <<- TRUE
+      resetTape2 <<- TRUE
     }
   ),
   buildDerivs = c('neg_logLikelihood', 'gr_neg_logLikelihood', 'inverse')
@@ -296,13 +314,31 @@ fit <- nlminb(values(cmodel, c('beta', 'sigma')),
 
 obj$inverse(fit$par)
 obj$standarderror(fit$par, trans = FALSE)
+
+obj$resetTape()
+fit.map <- nlminb(values(cmodel, c('beta', 'sigma')), 
+    obj$neg_logLikelihood, obj$gr_neg_logLikelihood, penalized = TRUE, jacobian = TRUE)
+obj$inverse(fit$par)
+obj$inverse(fit.map$par)
+
+obj$resetTape()
+fit.pen <- nlminb(values(cmodel, c('beta', 'sigma')), 
+    obj$neg_logLikelihood, obj$gr_neg_logLikelihood, penalized = TRUE, jacobian = FALSE)
+obj$inverse(fit.pen$par)
+
+## Hessian is used here so let's reset tape here too.
+obj$resetTape()
+obj$standarderror(fit$par, trans = FALSE)
+obj$resetTape()
+obj$standarderror(fit.map$par, trans = FALSE)
+obj$resetTape()
+obj$standarderror(fit.pen$par, trans = FALSE)
 ```
 
 Well that was a lot of work to find the MLE for a super basic problem. But it's actually fully generalized for any model input. Let's reassess the Harrison Chinook data and use this again.
 
 ```{r harck, echo = TRUE, show = 'markup', eval = FALSE}
-library(samEst)
-data(harck)
+load('harck')
 
 modelcode <- nimbleCode({
   ## Make some priors. These give bounds for parameter transformations.
@@ -339,7 +375,7 @@ obj$inverse(fit$par)
 obj$standarderror(fit$par, trans = FALSE)
 ```
 
-Now try writing an auto regressive process for these data in Nimble.
+Now try writing an auto regressive process for these data in Nimble. Does this work? Play around with the prior distributions because flat are probably a bad idea!
 
 ```{r harckAR1, echo = TRUE, show = 'markup', eval = FALSE}
 load("harck")

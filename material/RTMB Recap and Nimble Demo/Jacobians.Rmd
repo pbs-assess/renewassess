@@ -45,18 +45,19 @@ $$f_y(\mathbf{y}) = f_x(g^{-1}(\mathbf{x})) |\mathbf{J}_{g^{-1}(x)}|.$$
 
 Let's start with the simplest version we are familiar with where $x$ is a standard normal distribution,
 $$ f_x(x) = \frac{1}{\sqrt{2\pi}}e^{-0.5x^2}. $$
-Then, if $y = \mu + z\sigma$, then 
+Then, if $y = \mu + x\sigma$, then 
 
 $$ f_y(y) = f_x((y - \mu)/\sigma) \times 1/\sigma = \frac{1}{\sqrt{2\pi}\sigma}e^{-0.5\big(\frac{y-\mu}{\sigma}\big)^2}.$$
 
 ## But when do I need Jacobians?
 
-1. Is your variable being transformed a RANDOM VARIABLE? Yes? Then you need a Jacobian.
+1. Is your variable being transformed a RANDOM VARIABLE? Yes? And you are calculating the density in terms of the transformed variable? Then you need a Jacobian.
 
 
 Example 1, you are running a linear model and need to transform $\theta = log(\sigma)$, so that we can fit $\theta$ for computational reasons doing maximum likelihood estimation. Do you need to do a transformation of variables?
 
 Example 2, it is the same situation, however you are going to find the posterior distribution. You assume that $\sigma \sim \text{gamma}(\alpha, \beta)$.
+
 a. You are using MCMC and a Gibbs sampler to sample $\sigma$.
 
 a. You are using MCMC and applying a standard Metropolis Hastings random walk.
@@ -64,7 +65,7 @@ a. You are using MCMC and applying a standard Metropolis Hastings random walk.
 a. You are using STAN and HMC to sample $\sigma$ with a constraint applied to the STAN
 argument.
 
-a. You are using STAN and HMC to sample $log(\sigma)$.
+a. You are using RTMB and STAN and HMC to sample $log(\sigma)$.
 
 a. You are just finding the maximum a posterior mode (MAP) of $log(\sigma)$.
 
@@ -217,10 +218,12 @@ fn <- function(par){
   Smsy <- (1 - lamw(exp(1 - log(alpha))))/beta
   umsy <- (1 - lamw(exp(1 - log(alpha))))
   Sgen <-  -1/beta*lamw(-beta*Smsy/alpha)
-
+  references <- c(Smsy, umsy, Sgen)
+  
   REPORT(Smsy)
   REPORT(umsy)
   REPORT(Sgen)
+  REPORT(references)
   REPORT(sigma)
   REPORT(alpha)
   REPORT(beta)
@@ -235,14 +238,14 @@ fit.stan <- tmbstan(obj, chains=1, iter = 10000,
 
 ## Let's get posterior samples for all our REPORTS.
 post <- as.matrix(fit.stan)
-report <- obj$report()
-post.report <- matrix(0,  nrow = nrow(post), ncol = length(report))
-colnames(post.report) <- names( do.call('c', report) )
+post.report <- NULL
 for( i in 1:nrow(post) )
-    post.report[i,] <- do.call('c', 
-        obj$report(post[i,seq_along(obj$par)]))
+    post.report <- rbind(post.report, 
+        unlist(obj$report(post[i,seq_along(obj$par)])))
 
-summary(coda::mcmc(post.report))
+sum.out <- summary(coda::mcmc(post.report))
+summary <- data.frame(do.call('cbind', sum.out))
+summary$params <- rownames(summary)
 ```
 
 ```{r echo = FALSE, eval = FALSE}

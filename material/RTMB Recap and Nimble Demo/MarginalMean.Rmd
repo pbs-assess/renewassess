@@ -90,7 +90,7 @@ predict(fit, newdata = data.frame(id = 50))
 - Let's compare the conditional mean estimates with the true values.
 
 ```{r, echo = TRUE}
-condmean.true <- exp(re.true + 1.5)
+condmean.true <- exp(re.true + loglambda)
 condmean.est <- predict(fit, newdata = data.frame(id = 1:25), type = "response")
 boxplot(condmean.est - condmean.true)
 abline(h = 0, col = 'red')
@@ -121,7 +121,7 @@ y <- exp(x)
 mean(y - exp(mu))
 mean(y - exp(mu + sigma^2/2))
 
-median(y - exp(2))
+median(y - exp(mu))
 ```
 
 - Circling back, in the Poisson example, we were using a log link function and fitting,
@@ -208,19 +208,33 @@ summary(sdrepc, "report")
 
 ### The Ricker Curve
 
-Now consider the Harrison Chinook data again. If we assume a Ricker stock relationship curve with log-normal error, then
-$$ log(R_i/S_i) = log(\alpha) - \beta S_i + \epsilon_i,$$
+The Ricker curve is written as,
+$$R = S \alpha e^{- \beta S},$$
+where $R$ is the number of recruits and $S$ is the number of spawners that produced those recruits. In this case, they state that $R_i$ represents the expected number of recruits in this relationship, meaning that this equation should be interpretable. Following that, we will write,
+$$\mathbb{E}(R) = S \alpha e^{- \beta S}$$
+to make this explicit. If we assume that $R \sim \text{log-normal}(\mu, \sigma^2)$. We now need
+$$ \mathbb{E}(R) = \int \mathbb{E}(S\text{exp}(log(\alpha) - \beta S + \epsilon)|\mathbf{\epsilon} = \mathbf{\epsilon})f_\mathbf{\epsilon}(\epsilon)d\epsilon.$$
 where $\epsilon_i \sim \text{normal}(0, \sigma^2)$.
 
-People often state that they want to model the mean stock recruit relationship. Similar to the marginal mean, we need,
-$$ \mathbb{E}(R/S) = \int \mathbb{E}(\text{exp}(log(\alpha) - \beta S_i + \epsilon)|\mathbf{\epsilon} = \mathbf{\epsilon})f_\mathbf{\epsilon}(\epsilon)d\epsilon.$$
+As before, we may adjust the linear relationship such that,
+$$\mathbb{E}(log(R)) = \mu = log(S) + log(\alpha) - \beta S - \sigma^2/2.$$
+This then ensures that the mean Ricker stock recruit relationship is being modeled.
 
-Then as before, we may adjust the linear relationship such that,
-$$log(R_i/S_i) = log(\alpha) - \beta S_i + \epsilon_i - \sigma^2/2.$$
-Okay great. Writing the model this way ensures that the Ricker model is marginally interpretable.
+Now consider the Harrison Chinook data again. Let's model this relationship with and without any correction.
 
 ```{r, echo = TRUE}
 load("harck")
+
+nll <- function(pars){
+  getAll(pars, harck)
+  sd <- exp(logsd)
+  beta <- exp(logbeta)
+  ExpectedR <- exp(logalpha - beta*S)*S
+  REPORT(ExpectedR)
+  negll <- -sum(dnorm(logRS, mean = logalpha - beta*S, sd = sd, log = TRUE))
+  negll
+}
+
 nll_corrected <- function(pars){
   getAll(pars, harck)
   sd <- exp(logsd)
@@ -231,9 +245,19 @@ nll_corrected <- function(pars){
   negll
 }
 
+obj <- MakeADFun(nll, 
+  parameters = list(logsd = 0, logbeta = 0, logalpha = 0), silent = TRUE)
+fit <- nlminb(obj$par, obj$fn, obj$gr)
 objc <- MakeADFun(nll_corrected, 
   parameters = list(logsd = 0, logbeta = 0, logalpha = 0), silent = TRUE)
 fitc <- nlminb(objc$par, objc$fn, objc$gr)
+
+## See the differences:
+fitc$par['logalpha'] - exp(fitc$par['logsd'])^2/2 - fit$par['logalpha']
+
+exp(fitc$par['logsd']) - exp(fit$par['logsd'])
+
+exp(fitc$par['logbeta']) - exp(fit$par['logbeta'])
 ```
 
 - What is the impact of adding this correction term to the linear equation?
