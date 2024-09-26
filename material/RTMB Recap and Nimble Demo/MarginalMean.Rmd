@@ -223,6 +223,7 @@ This then ensures that the mean Ricker stock recruit relationship is being model
 Now consider the Harrison Chinook data again. Let's model this relationship with and without any correction.
 
 ```{r, echo = TRUE}
+library(RTMB)
 load("harck")
 
 nll <- function(pars){

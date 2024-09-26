@@ -548,7 +548,8 @@ to make this explicit. If we assume that <span class="math inline">\(R
 stock recruit relationship is being modeled.</p>
 <p>Now consider the Harrison Chinook data again. Let’s model this
 relationship with and without any correction.</p>
-<pre class="r"><code>load(&quot;harck&quot;)
+<pre class="r"><code>library(RTMB)
+load(&quot;harck&quot;)
 
 nll &lt;- function(pars){
   getAll(pars, harck)
